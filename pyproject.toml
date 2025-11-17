@@ -1,0 +1,45 @@
+[project]
+name = "advanced-gpu-bench"
+version = "0.1.0"
+description = "A full PyTorch GPU benchmarking suite for RTX 5090 with torch.compile, mixed precision, training, and memory tests."
+requires-python = ">=3.13, <3.14"
+authors = [
+    { name = "Hamza Gbada", email = "hamza.gbada@gmail.com" }
+]
+readme = "README.md"
+license = { text = "MIT" }
+
+# Your runtime dependencies
+dependencies = [
+    "torch",         # Will be pulled from cu130 index
+    "torchvision",   # Will be pulled from cu130 index
+    "numpy",
+    "pandas",
+    "matplotlib",
+    "pynvml",
+    "psutil"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+]
+
+# CLI command: "gpu-bench"
+[project.scripts]
+gpu-bench = "advanced_gpu_bench:main"
+
+# uv-specific settings
+#[tool.uv]
+#package = true
+
+# Tell uv where to fetch torch & torchvision from
+[tool.uv.sources]
+torch = { index = "pytorch-cu130" }
+torchvision = { index = "pytorch-cu130" }
+
+# Register the PyTorch CUDA 13.0 wheel index
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
