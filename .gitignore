@@ -3,4 +3,5 @@
 logs
 results
 benchmark_results.csv
-benchmark_results.json
+benchmark_results.json__pycache__/
+*.pyc
