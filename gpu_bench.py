@@ -92,15 +92,19 @@ def conv_benchmark():
 def memory_bandwidth_benchmark():
     print("\nRunning Memory Bandwidth Test...")
 
-    size = 2_000_000_000  # 2 billion bytes (~2 GB)
-    a = torch.empty(size, dtype=torch.float32, device='cuda')
+    # Size the buffer from free VRAM: two copies must fit (source + clone).
+    # (The old value, 2e9 float32 = 8 GB per buffer, OOMed on any card < 16 GB.)
+    free, _ = torch.cuda.mem_get_info()
+    nbytes = min(2 * 1024**3, int(free * 0.4))
+    a = torch.empty(nbytes // 4, dtype=torch.float32, device='cuda')
+    b = torch.empty_like(a)
 
     def run():
-        b = a.clone()  # GPU -> GPU memory copy
+        b.copy_(a)  # GPU -> GPU memory copy
 
-    t = benchmark_step("2GB GPU memcpy", run, repeat=10)
+    t = benchmark_step(f"{nbytes / 2**30:.1f}GB GPU memcpy", run, repeat=10)
 
-    bandwidth = (size * 4) / t / 1e9  # GB/s
+    bandwidth = 2 * nbytes / t / 1e9  # GB/s (read + write)
     print(f"Memory Bandwidth: {bandwidth:.2f} GB/s")
 
     return bandwidth

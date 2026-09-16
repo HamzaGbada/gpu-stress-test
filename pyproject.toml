@@ -1,45 +1,49 @@
 [project]
-name = "advanced-gpu-bench"
-version = "0.1.0"
-description = "A full PyTorch GPU benchmarking suite for RTX 5090 with torch.compile, mixed precision, training, and memory tests."
-requires-python = ">=3.13, <3.14"
+name = "gpu-stress"
+version = "0.2.0"
+description = "Multi-step GPU stress test & evaluation pipeline. Zero-dependency CUDA driver-API edition plus an optional full PyTorch suite (ResNet50 training, torch.compile, mixed precision)."
+requires-python = ">=3.10"
 authors = [
     { name = "Hamza Gbada", email = "hamza.gbada@gmail.com" }
 ]
 readme = "README.md"
 license = { text = "MIT" }
 
-# Your runtime dependencies
-dependencies = [
-    "torch",         # Will be pulled from cu130 index
-    "torchvision",   # Will be pulled from cu130 index
-    "numpy",
-    "pandas",
-    "matplotlib",
-    "pynvml",
-    "psutil"
-]
+# The lite pipeline needs nothing but the NVIDIA driver (libcuda + libnvidia-ml).
+dependencies = []
 
 [project.optional-dependencies]
+# Full PyTorch suite (several GB of wheels).
+torch = [
+    "torch",         # pulled from the cu130 index below
+    "torchvision",
+]
+# Telemetry plot (PNG / --gui) for either pipeline.
+plot = ["matplotlib"]
 dev = [
     "pytest",
     "ruff",
 ]
 
-# CLI command: "gpu-bench"
 [project.scripts]
-gpu-bench = "advanced_gpu_bench:main"
+gpu-stress-lite = "gpu_stress.lite_pipeline:main"   # no torch needed
+gpu-stress = "gpu_stress.torch_pipeline:main"        # needs the [torch] extra
 
-# uv-specific settings
-#[tool.uv]
-#package = true
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
-# Tell uv where to fetch torch & torchvision from
+[tool.hatch.build.targets.wheel]
+packages = ["gpu_stress"]
+
 [tool.uv.sources]
 torch = { index = "pytorch-cu130" }
 torchvision = { index = "pytorch-cu130" }
 
-# Register the PyTorch CUDA 13.0 wheel index
 [[tool.uv.index]]
 name = "pytorch-cu130"
 url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.ruff]
+line-length = 120
