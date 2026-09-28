@@ -3,14 +3,19 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/HamzaGbada/gpu-stress-test/main/install.sh | sh
 #
-# Installs the zero-dependency lite pipeline. With uv, pipx or pip available it
-# installs the Python package (giving you `gpu-stress-lite` and, with the torch
-# extra, `gpu-stress`); otherwise it drops the single-file zipapp into
-# ~/.local/bin/gpu-stress-lite, which needs nothing but python3 and the driver.
+# By default this installs the zero-dependency lite pipeline, which gives you the
+# `gpu-stress-lite` command and needs nothing but an NVIDIA driver. The PyTorch
+# pipeline (`gpu-stress`) is an optional extra worth several GB of wheels:
+#
+#   GPU_STRESS_EXTRAS=torch,plot curl -fsSL .../install.sh | sh
+#
+# With uv, pipx or pip present the Python package is installed; otherwise a
+# single-file zipapp is dropped into ~/.local/bin/gpu-stress-lite.
 #
 # Environment:
 #   GPU_STRESS_VERSION  tag to install, or "main" (default: latest release)
 #   GPU_STRESS_METHOD   auto | uv | pipx | pip | zipapp   (default: auto)
+#   GPU_STRESS_EXTRAS   comma list of extras, e.g. torch,plot (default: none)
 #   GPU_STRESS_BIN      install dir for the zipapp        (default: ~/.local/bin)
 #   GPU_STRESS_REPO     owner/name of the GitHub repo
 set -eu
@@ -18,6 +23,7 @@ set -eu
 REPO="${GPU_STRESS_REPO:-HamzaGbada/gpu-stress-test}"
 VERSION="${GPU_STRESS_VERSION:-}"
 METHOD="${GPU_STRESS_METHOD:-auto}"
+EXTRAS="${GPU_STRESS_EXTRAS:-}"
 BIN_DIR="${GPU_STRESS_BIN:-$HOME/.local/bin}"
 
 say()  { printf '%s\n' "$*"; }
@@ -57,7 +63,13 @@ if [ -z "$REF" ]; then
     fi
     [ -n "$REF" ] || REF="main"
 fi
-SPEC="git+https://github.com/$REPO@$REF"
+# A bare VCS URL for the default install; a PEP 508 direct reference when extras
+# are requested, which is the only form that carries them: gpu-stress[torch] @ git+...
+if [ -n "$EXTRAS" ]; then
+    SPEC="gpu-stress[$EXTRAS] @ git+https://github.com/$REPO@$REF"
+else
+    SPEC="git+https://github.com/$REPO@$REF"
+fi
 
 # ------------------------------------------------------------------- download
 fetch() {  # fetch URL DEST
@@ -70,6 +82,10 @@ fetch() {  # fetch URL DEST
 install_zipapp() {
     if [ "${VERSION:-}" = "main" ]; then
         die "the zipapp is published per release; use GPU_STRESS_VERSION=<tag> or another method"
+    fi
+    if [ -n "$EXTRAS" ]; then
+        warn "the zipapp cannot carry extras ($EXTRAS) - it is the lite pipeline only."
+        warn "For the PyTorch pipeline, install with uv, pipx or pip instead."
     fi
     url="https://github.com/$REPO/releases/latest/download/gpu-stress.pyz"
     [ "$REF" = "main" ] || url="https://github.com/$REPO/releases/download/$REF/gpu-stress.pyz"
@@ -120,6 +136,14 @@ esac
 say ""
 say "  gpu-stress-lite --list          # show the steps"
 say "  gpu-stress-lite --burn 60       # full run, 60s per sustained load"
-say ""
-say "For the PyTorch pipeline (several GB of wheels):"
-say "  uv tool install --force --with 'gpu-stress[torch]' $SPEC   # or: pip install 'gpu-stress[torch] @ $SPEC'"
+case "$EXTRAS" in
+    *torch*)
+        say "  gpu-stress --epochs 3           # PyTorch pipeline (installed)"
+        ;;
+    *)
+        say ""
+        say "The PyTorch pipeline (gpu-stress) is not installed: it pulls several GB of"
+        say "wheels, so it is an opt-in extra. To add it, re-run with:"
+        say "  GPU_STRESS_EXTRAS=torch,plot   (plot also enables telemetry PNGs)"
+        ;;
+esac
