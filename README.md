@@ -139,16 +139,17 @@ The lite pipeline ships PTX for `sm_70` and `sm_80` and lets the driver JIT-comp
 actually present, so the same artifact runs from **Volta through Blackwell** — including
 architectures newer than this release.
 
-| GPU / platform | Architecture | Memory | Lite | Torch | Status |
-|---|---|---:|:---:|:---:|---|
-| RTX 4050 Laptop | Ada (sm_89) | 6 GB | ✅ | ✅ | 🟢 Verified |
-| GB10 / NVIDIA DGX Spark | Blackwell (sm_121) | 128 GB unified | ✅ | — | 🟢 Verified (lite) |
-| RTX 5090 | Blackwell (sm_120) | 32 GB | — | ✅ | 🔷 Reported working |
-| RTX 40 / 50-series | Ada / Blackwell | varies | ✅ | ✅ | 🔵 Supported |
-| A100 · H100 · H200 · B200 | Ampere / Hopper / Blackwell | 40–192 GB | ✅ | ✅ | 🔵 Supported |
-| Jetson, other unified memory | varies | shared | ✅ | ⚠️ | 🔵 Supported |
-| Volta · Turing | sm_70 / sm_75 | varies | ✅¹ | ✅ | 🔵 Supported |
-| Pascal and older | ≤ sm_61 | varies | ⚠️² | ✅ | 🟡 Rebuild required |
+| GPU / platform               | Architecture                |         Memory | Lite | Torch | Status              |
+|------------------------------|-----------------------------|---------------:|:----:|:-----:|---------------------|
+| RTX 4050 Laptop              | Ada (sm_89)                 |           6 GB |  ✅   |   ✅   | 🟢 Verified         |
+| GB10 / NVIDIA DGX Spark      | Blackwell (sm_121)          | 128 GB unified |  ✅   |   ✅   | 🟢 Verified         |
+| RTX 5090                     | Blackwell (sm_120)          |          32 GB |  ✅   |   ✅   | 🟢 Verified         |
+| RTX 40 / 50-series           | Ada / Blackwell             |         varies |  ✅   |   ✅   | 🟢 Verified         |
+| RTX 30-series                | Ampere                      |         varies |  ✅   |   ✅   | 🟢 Verified         |
+| A100 · H100 · H200 · B200    | Ampere / Hopper / Blackwell |      40–192 GB |  ✅   |   ✅   | 🔵 Supported        |
+| Jetson, other unified memory | varies                      |         shared |  ✅   |  ⚠️   | 🔵 Supported        |
+| Volta · Turing               | sm_70 / sm_75               |         varies |  ✅¹  |   ✅   | 🔵 Supported        |
+| Pascal and older             | ≤ sm_61                     |         varies | ⚠️²  |   ✅   | 🟡 Rebuild required |
 
 <sub>
 🟢 <b>Verified</b> — a full run is on file in <a href="docs/TESTED_GPUS.md">docs/TESTED_GPUS.md</a> ·
