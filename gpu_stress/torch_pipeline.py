@@ -65,7 +65,9 @@ pipeline works on any machine with a driver. Either:
       pipx install "gpu-stress[torch] @ git+https://github.com/HamzaGbada/gpu-stress-test"
       pip install "gpu-stress[torch] @ git+https://github.com/HamzaGbada/gpu-stress-test"
 
-    or re-run the installer with:  GPU_STRESS_EXTRAS=torch,plot ... | sh
+    or re-run the installer with the --torch flag:
+
+      curl -fsSL https://raw.githubusercontent.com/HamzaGbada/gpu-stress-test/main/install.sh | sh -s -- --torch
 """
 
 

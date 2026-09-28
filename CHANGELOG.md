@@ -4,6 +4,24 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] - 2026-09-28
+
+Documentation and installer usability fix. The lite pipeline, the kernels and the
+evaluation rules are unchanged from 0.3.1.
+
+### Fixed
+
+* The documented way to install the PyTorch extra did not work. `VAR=value curl ... | sh`
+  sets the variable for `curl`, not for the `sh` that runs the script, so the installer
+  never saw `GPU_STRESS_EXTRAS` and silently installed the lite pipeline only. The
+  installer now takes command-line options, which cannot be misplaced the same way:
+
+      curl -fsSL .../install.sh | sh -s -- --torch
+
+  `--extras`, `--torch`, `--version`, `--method`, `--bin` and `--help` are accepted, each
+  overriding its `GPU_STRESS_*` variable, and the README, the installer's own help and the
+  `gpu-stress` missing-torch hint all show the working form.
+
 ## [0.3.1] - 2026-09-28
 
 Follow-up to 0.3.0: the installer set up two commands but only one working pipeline.
@@ -13,7 +31,7 @@ Follow-up to 0.3.0: the installer set up two commands but only one working pipel
 * `GPU_STRESS_EXTRAS` for the installer, so the PyTorch pipeline can be installed in the
   same command:
 
-      GPU_STRESS_EXTRAS=torch,plot curl -fsSL .../install.sh | sh
+      curl -fsSL .../install.sh | sh -s -- --torch
 
   Extras are passed as a PEP 508 direct reference (`gpu-stress[torch] @ git+...`), which is
   the only form that carries them through uv, pipx and pip alike. The closing message now
@@ -133,6 +151,7 @@ First tagged release.
 
 * Initial scripts: `gpu_bench.py`, `gpu_bench_details.py`, `gpu_stress_cli.py`.
 
+[0.3.2]: https://github.com/HamzaGbada/gpu-stress-test/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/HamzaGbada/gpu-stress-test/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/HamzaGbada/gpu-stress-test/releases/tag/v0.3.0
 [0.2.0]: https://github.com/HamzaGbada/gpu-stress-test/compare/v0.1.0...v0.2.0
