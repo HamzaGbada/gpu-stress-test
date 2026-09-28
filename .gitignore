@@ -2,6 +2,10 @@
 .venv
 logs
 results
+dist
+build
+*.egg-info
 benchmark_results.csv
-benchmark_results.json__pycache__/
+benchmark_results.json
+__pycache__/
 *.pyc

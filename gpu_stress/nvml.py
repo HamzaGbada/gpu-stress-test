@@ -132,6 +132,17 @@ class Nvml:
     def bus_width(self) -> int | None:
         return self._uint("nvmlDeviceGetMemoryBusWidth")
 
+    def pcie_link(self) -> dict:
+        """Current and maximum PCIe training. A card sitting in an x4 slot, or a
+        link that never leaves gen1, shows up here rather than as a mystery in
+        the transfer benchmark."""
+        return {
+            "pcie_gen": self._uint("nvmlDeviceGetCurrPcieLinkGeneration"),
+            "pcie_width": self._uint("nvmlDeviceGetCurrPcieLinkWidth"),
+            "pcie_gen_max": self._uint("nvmlDeviceGetMaxPcieLinkGeneration"),
+            "pcie_width_max": self._uint("nvmlDeviceGetMaxPcieLinkWidth"),
+        }
+
     def static_info(self) -> dict:
         return {
             "nvml_available": self.ok,
@@ -142,6 +153,7 @@ class Nvml:
             "temp_slowdown_c": self.temp_threshold(NVML_TEMPERATURE_THRESHOLD_SLOWDOWN),
             "temp_shutdown_c": self.temp_threshold(NVML_TEMPERATURE_THRESHOLD_SHUTDOWN),
             "bus_width_bits": self.bus_width(),
+            **self.pcie_link(),
         }
 
     # -- dynamic -------------------------------------------------------------

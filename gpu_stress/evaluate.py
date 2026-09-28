@@ -42,12 +42,32 @@ def theoretical_fp32_tflops(device: dict, clock_mhz: float | None = None) -> flo
 
 
 def theoretical_bandwidth_gbs(device: dict) -> float | None:
-    """GDDR: data rate = 2 x memory clock (NVML/driver report the I/O clock)."""
+    """GDDR: data rate = 2 x memory clock (NVML/driver report the I/O clock).
+
+    Returns None when the bus width is unknown. Unified-memory parts (Grace
+    Blackwell GB10, Jetson, iGPUs) report a width of 0 because there is no
+    dedicated GPU bus to describe, so those are measured but not scored.
+    """
     clk = device.get("mem_clock_mhz") or device.get("max_mem_clock_mhz")
     bus = device.get("bus_width_bits")
     if not (clk and bus):
         return None
     return clk * 1e6 * 2 * bus / 8 / 1e9
+
+
+# Usable per-lane throughput after link encoding, GB/s (8b/10b up to gen2,
+# 128b/130b from gen3, PAM4 from gen6).
+PCIE_LANE_GBS = {1: 0.250, 2: 0.500, 3: 0.985, 4: 1.969, 5: 3.938, 6: 7.563}
+
+
+def theoretical_pcie_gbs(device: dict) -> float | None:
+    """One-directional peak of the host<->device link at its current training."""
+    if device.get("integrated"):
+        return None
+    gen, width = device.get("pcie_gen"), device.get("pcie_width")
+    if not (gen and width) or gen not in PCIE_LANE_GBS:
+        return None
+    return PCIE_LANE_GBS[gen] * width
 
 
 # ---------------------------------------------------------------------------
@@ -68,9 +88,21 @@ def telemetry_findings(t: WindowSummary, device: dict) -> list[Finding]:
             out.append(Finding("warn", f"GPU reached {t.temp_max}°C"))
 
     if t.hard_throttle_pct > 0:
-        reasons = ", ".join(r for r in t.throttle_reasons if r in ("hw_slowdown", "sw_thermal_slowdown", "hw_thermal_slowdown", "hw_power_brake_slowdown"))
-        lvl = "fail" if t.hard_throttle_pct >= 10 else "warn"
-        out.append(Finding(lvl, f"thermal/HW slowdown active {t.hard_throttle_pct:.0f}% of the time ({reasons})"))
+        hard = ("hw_slowdown", "sw_thermal_slowdown", "hw_thermal_slowdown", "hw_power_brake_slowdown")
+        reasons = [r for r in t.throttle_reasons if r in hard]
+        # Some boards (laptop Ada parts in particular) assert a thermal slowdown
+        # flag while sitting 30 C below their own threshold. Believe the
+        # thermometer over the flag when the two disagree that badly.
+        thermal_only = all("thermal" in r for r in reasons)
+        implausible = thermal_only and slowdown and t.temp_max is not None and t.temp_max < slowdown - 15
+        if implausible:
+            out.append(Finding("info", f"NVML reported a thermal slowdown {t.hard_throttle_pct:.0f}% of the time "
+                                       f"({', '.join(reasons)}) but the GPU peaked at {t.temp_max}°C, far below its "
+                                       f"{slowdown}°C threshold - treating the flag as spurious"))
+        else:
+            lvl = "fail" if t.hard_throttle_pct >= 10 else "warn"
+            out.append(Finding(lvl, f"thermal/HW slowdown active {t.hard_throttle_pct:.0f}% of the time "
+                                    f"({', '.join(reasons)})"))
     elif "sw_power_cap" in t.throttle_reasons and t.throttle_pct >= 50:
         out.append(Finding("info", f"power-capped {t.throttle_pct:.0f}% of the time (normal under full load)"))
 

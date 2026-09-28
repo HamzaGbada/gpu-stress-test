@@ -103,7 +103,8 @@ class Pipeline:
                 findings.append(Finding("fail", f"step ran out of GPU memory: {str(e).splitlines()[0][:200]}"))
             except KeyboardInterrupt:
                 raise
-            except Exception as e:  # noqa: BLE001 - one step failing must not kill the run
+            # A failing step must never kill the run: record it and continue.
+            except Exception as e:
                 status, error = "error", f"{type(e).__name__}: {e}"
                 ctx.log(traceback.format_exc())
                 findings.append(Finding("fail", f"step crashed: {type(e).__name__}: {str(e)[:200]}"))
@@ -115,7 +116,8 @@ class Pipeline:
             if step.evaluate and status != "error":
                 try:
                     findings += step.evaluate(metrics, tele, ctx)
-                except Exception as e:  # noqa: BLE001
+                # A broken rule degrades to a warning rather than losing the metrics.
+                except Exception as e:
                     findings.append(Finding("warn", f"evaluation failed: {type(e).__name__}: {e}"))
             if status == "pass":
                 status = worst(findings)

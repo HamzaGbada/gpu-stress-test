@@ -1,13 +1,15 @@
 // CUDA C kernels for the zero-dependency GPU stress pipeline.
 //
-// Compiled ahead of time to PTX (see build_ptx.sh) and loaded through the
-// CUDA driver API (libcuda.so) with ctypes -- no toolkit, no PyTorch and no
-// numba are needed at runtime, only the NVIDIA driver.
+// Compiled ahead of time to PTX (see nvrtc.py) and loaded through the CUDA
+// driver API (libcuda.so) with ctypes -- no toolkit, no PyTorch and no numba
+// are needed at runtime, only the NVIDIA driver.
 //
 //   kernels_sm70.ptx : everything except the tensor-core kernel (sm_70+)
-//   kernels_sm80.ptx : mma_burn, needs mma.sync.m16n8k16 (sm_80+)
-
-// No headers: fp16 is done with inline PTX so NVRTC needs no include path.
+//   kernels_sm80.ptx : adds mma_burn, needs mma.sync.m16n8k16 (sm_80+)
+//
+// No headers are included: fp16 is done with inline PTX and every other
+// builtin (fmaf, atomics, warp intrinsics, vector types) is pre-declared by
+// NVRTC, so the shipped PTX can be rebuilt without any CUDA include path.
 
 // ---------------------------------------------------------------------------
 // fp16x2 helpers (packed pair of halves in one 32-bit register)
@@ -157,22 +159,44 @@ extern "C" __global__ void fill_pattern_f32(float *buf, unsigned long long n, un
 }
 
 // ---------------------------------------------------------------------------
-// VRAM integrity test (mini memtest): write pattern ^ index, read back, count
-// mismatches with an atomic counter.
+// VRAM integrity test (mini memtest).
+//
+// Writes `pattern ^ word_index` over the buffer and reads it back, counting
+// mismatches with an atomic counter. Both kernels move 16 B per thread per
+// step (uint4) because scalar 4 B accesses leave most of the memory pipeline
+// idle on wide-bus and unified-memory parts.
+//
+// `n4` counts uint4 elements. The word index is truncated to 32 bits, so the
+// data pattern repeats every 16 GiB - fill and check agree, and the value
+// still depends on the address within each window.
 // ---------------------------------------------------------------------------
-extern "C" __global__ void mem_fill(unsigned *buf, unsigned long long n, unsigned pattern)
+extern "C" __global__ void mem_fill(uint4 *buf, unsigned long long n4, unsigned pattern)
 {
     const unsigned long long stride = (unsigned long long)gridDim.x * blockDim.x;
-    for (unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += stride)
-        buf[i] = pattern ^ (unsigned)i;
+    for (unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x; i < n4; i += stride) {
+        const unsigned w = (unsigned)i << 2;
+        uint4 v;
+        v.x = pattern ^ w;
+        v.y = pattern ^ (w + 1u);
+        v.z = pattern ^ (w + 2u);
+        v.w = pattern ^ (w + 3u);
+        buf[i] = v;
+    }
 }
 
-extern "C" __global__ void mem_check(const unsigned *buf, unsigned long long n, unsigned pattern, unsigned *errors)
+extern "C" __global__ void mem_check(const uint4 *__restrict__ buf, unsigned long long n4,
+                                     unsigned pattern, unsigned *errors)
 {
     const unsigned long long stride = (unsigned long long)gridDim.x * blockDim.x;
     unsigned local = 0;
-    for (unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += stride)
-        local += (buf[i] != (pattern ^ (unsigned)i));
+    for (unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x; i < n4; i += stride) {
+        const unsigned w = (unsigned)i << 2;
+        const uint4 v = buf[i];
+        local += (v.x != (pattern ^ w));
+        local += (v.y != (pattern ^ (w + 1u)));
+        local += (v.z != (pattern ^ (w + 2u)));
+        local += (v.w != (pattern ^ (w + 3u)));
+    }
     if (local) atomicAdd(errors, local);
 }
 
@@ -184,6 +208,269 @@ extern "C" __global__ void copy_f4(const float4 *__restrict__ src, float4 *__res
     const unsigned long long stride = (unsigned long long)gridDim.x * blockDim.x;
     for (unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x; i < n4; i += stride)
         dst[i] = src[i];
+}
+
+// ---------------------------------------------------------------------------
+// Reductions used to verify the physics steps. Accumulation is in fp64 so the
+// invariant check is limited by the simulation, not by the reduction.
+// Both write one group of doubles per block; the host sums the blocks.
+// Launch with exactly RED_BLOCK threads per block.
+// ---------------------------------------------------------------------------
+#define RED_BLOCK 256
+#define DBL_BIG 1.7976931348623157e308
+
+extern "C" __global__ void reduce_stats_f32(const float *__restrict__ in, unsigned long long n, double *out)
+{
+    __shared__ double ssum[RED_BLOCK];
+    __shared__ double smin[RED_BLOCK];
+    __shared__ double smax[RED_BLOCK];
+    const unsigned t = threadIdx.x;
+    const unsigned long long stride = (unsigned long long)gridDim.x * blockDim.x;
+    double sum = 0.0, mn = DBL_BIG, mx = -DBL_BIG;
+    for (unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + t; i < n; i += stride) {
+        const double v = (double)in[i];
+        sum += v;
+        mn = v < mn ? v : mn;
+        mx = v > mx ? v : mx;
+    }
+    ssum[t] = sum; smin[t] = mn; smax[t] = mx;
+    __syncthreads();
+    for (unsigned s = RED_BLOCK / 2; s > 0; s >>= 1) {
+        if (t < s) {
+            ssum[t] += ssum[t + s];
+            smin[t] = smin[t + s] < smin[t] ? smin[t + s] : smin[t];
+            smax[t] = smax[t + s] > smax[t] ? smax[t + s] : smax[t];
+        }
+        __syncthreads();
+    }
+    if (t == 0) {
+        out[blockIdx.x * 3 + 0] = ssum[0];
+        out[blockIdx.x * 3 + 1] = smin[0];
+        out[blockIdx.x * 3 + 2] = smax[0];
+    }
+}
+
+// Total momentum (m*v) and momentum magnitude scale (m*|v|) of an N-body state.
+extern "C" __global__ void nbody_reduce(const float4 *__restrict__ vel, unsigned n, double *out)
+{
+    __shared__ double sx[RED_BLOCK], sy[RED_BLOCK], sz[RED_BLOCK], sa[RED_BLOCK];
+    const unsigned t = threadIdx.x;
+    const unsigned stride = gridDim.x * blockDim.x;
+    double px = 0.0, py = 0.0, pz = 0.0, pa = 0.0;
+    for (unsigned i = blockIdx.x * blockDim.x + t; i < n; i += stride) {
+        const float4 v = vel[i];
+        const double m = (double)v.w;
+        px += m * (double)v.x;
+        py += m * (double)v.y;
+        pz += m * (double)v.z;
+        pa += m * (double)sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
+    }
+    sx[t] = px; sy[t] = py; sz[t] = pz; sa[t] = pa;
+    __syncthreads();
+    for (unsigned s = RED_BLOCK / 2; s > 0; s >>= 1) {
+        if (t < s) { sx[t] += sx[t + s]; sy[t] += sy[t + s]; sz[t] += sz[t + s]; sa[t] += sa[t + s]; }
+        __syncthreads();
+    }
+    if (t == 0) {
+        out[blockIdx.x * 4 + 0] = sx[0];
+        out[blockIdx.x * 4 + 1] = sy[0];
+        out[blockIdx.x * 4 + 2] = sz[0];
+        out[blockIdx.x * 4 + 3] = sa[0];
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Physics 1: direct N-body gravity (O(N^2), shared-memory tiled).
+//
+// pos/vel are float4: xyz + mass in .w for pos, xyz + mass in .w for vel.
+// Leapfrog-ish: a = sum_j m_j * r_ij / (|r_ij|^2 + eps^2)^{3/2}, then
+// v += a*dt, p += v*dt. Self-interaction contributes exactly zero (r = 0).
+//
+// Physical invariant: Newton's third law makes the forces antisymmetric, so
+// total momentum is conserved. The host starts from zero net momentum and
+// checks it stays there - a silent ALU fault breaks the symmetry immediately.
+//
+// n must be a multiple of NB_TILE and grid = n / NB_TILE (no bounds checks).
+// FLOPs ~ 20 per interaction (the usual N-body convention).
+// ---------------------------------------------------------------------------
+#define NB_TILE 256
+extern "C" __global__ void nbody_step(const float4 *__restrict__ pos, const float4 *__restrict__ vel,
+                                      float4 *__restrict__ out_pos, float4 *__restrict__ out_vel,
+                                      int n, float dt, float eps2)
+{
+    __shared__ float4 sh[NB_TILE];
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    const float4 p = pos[tid];
+    float ax = 0.f, ay = 0.f, az = 0.f;
+
+    for (int tile = 0; tile < n; tile += NB_TILE) {
+        sh[threadIdx.x] = pos[tile + threadIdx.x];
+        __syncthreads();
+#pragma unroll 4
+        for (int j = 0; j < NB_TILE; ++j) {
+            const float dx = sh[j].x - p.x;
+            const float dy = sh[j].y - p.y;
+            const float dz = sh[j].z - p.z;
+            const float d2 = fmaf(dx, dx, fmaf(dy, dy, fmaf(dz, dz, eps2)));
+            const float inv = rsqrtf(d2);
+            const float s = sh[j].w * inv * inv * inv;
+            ax = fmaf(dx, s, ax);
+            ay = fmaf(dy, s, ay);
+            az = fmaf(dz, s, az);
+        }
+        __syncthreads();
+    }
+
+    float4 v = vel[tid];
+    v.x = fmaf(ax, dt, v.x);
+    v.y = fmaf(ay, dt, v.y);
+    v.z = fmaf(az, dt, v.z);
+    out_vel[tid] = v;
+
+    float4 np = p;
+    np.x = fmaf(v.x, dt, p.x);
+    np.y = fmaf(v.y, dt, p.y);
+    np.z = fmaf(v.z, dt, p.z);
+    out_pos[tid] = np;
+}
+
+// ---------------------------------------------------------------------------
+// Physics 2: 2D heat diffusion, 5-point Jacobi stencil, periodic boundaries.
+//
+//   u' = u + alpha * (uN + uS + uE + uW - 4u)
+//
+// Two invariants the host checks, both exact in real arithmetic:
+//   * conservation: with periodic BCs the total heat sum(u) is unchanged;
+//   * maximum principle: for 0 <= alpha <= 0.25 the update is a convex
+//     combination, so u' can never leave the initial [min, max] range.
+// Either one breaking means the GPU computed something wrong.
+//
+// Width/height are powers of two so the wrap-around is a mask, not a modulo.
+// Memory-bound: ~5 loads + 1 store per cell, ~6 flops.
+// ---------------------------------------------------------------------------
+extern "C" __global__ void heat_step(const float *__restrict__ u, float *__restrict__ un,
+                                     int w, int h, float alpha)
+{
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= w || y >= h) return;
+    const int wm = w - 1, hm = h - 1;          // w, h are powers of two
+    const int row = y * w;
+    const float c = u[row + x];
+    const float e = u[row + ((x + 1) & wm)];
+    const float we = u[row + ((x - 1) & wm)];
+    const float s = u[(((y + 1) & hm)) * w + x];
+    const float nr = u[(((y - 1) & hm)) * w + x];
+    un[row + x] = fmaf(alpha, (e + we + s + nr) - 4.0f * c, c);
+}
+
+// ---------------------------------------------------------------------------
+// Hardware edge cases: IEEE-754 corner values, integer/64-bit arithmetic,
+// atomics, warp intrinsics and shared-memory sync. Every check has a single
+// right answer, so a set bit means the GPU (or its clocks) is misbehaving.
+//
+// Inputs come from memory so nothing can be constant-folded at compile time.
+// Launch with exactly 256 threads per block.
+// ---------------------------------------------------------------------------
+#define EC_DENORMAL_FLUSHED 0x0001u
+#define EC_NAN_COMPARE      0x0002u
+#define EC_INF_ARITH        0x0004u
+#define EC_INT_OPS          0x0008u
+#define EC_SHFL             0x0010u
+#define EC_BALLOT           0x0020u
+#define EC_SHARED_REDUCE    0x0040u
+#define EC_FMA_NOT_FUSED    0x0080u
+#define EC_SQRT_SPECIAL     0x0100u
+#define EC_ROUNDING         0x0200u
+#define EC_INT64            0x0400u
+
+extern "C" __global__ void edge_cases(const float *__restrict__ in, unsigned *flags, unsigned *counters, int seed)
+{
+    __shared__ unsigned sred[256];
+    const unsigned tid = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned m = 0;
+
+    const float den = in[0];      // 1.4e-45f, the smallest denormal (bits 0x1)
+    const float zero = in[1];     // 0.0f
+    const float inf = in[2];      // +inf
+    const float qnan = in[3];     // NaN
+    const float a = in[6];        // 1 + 2^-23
+    const float b = in[7];        // 1 - 2^-24
+    const float negone = in[8];   // -1.0f
+    const float two = in[9];      // 2.0f
+
+    // -- denormals: den * 2 must stay denormal (bits 0x2), not flush to zero --
+    if (__float_as_uint(den * two) != 0x00000002u) m |= EC_DENORMAL_FLUSHED;
+
+    // -- NaN comparisons: every ordered compare with NaN is false --
+    if ((qnan == qnan) || !(qnan != qnan) || (qnan < two) || (qnan >= two)) m |= EC_NAN_COMPARE;
+
+    // -- infinities --
+    if (__float_as_uint(1.0f / zero) != 0x7F800000u) m |= EC_INF_ARITH;
+    if ((__float_as_uint(inf - inf) & 0x7FFFFFFFu) <= 0x7F800000u) m |= EC_INF_ARITH;  // must be NaN
+    if (__float_as_uint(inf + two) != 0x7F800000u) m |= EC_INF_ARITH;
+    if (__float_as_uint(negone * inf) != 0xFF800000u) m |= EC_INF_ARITH;
+
+    // -- rounding: (1+2^-23)*(1-2^-24) rounds to exactly 1.0, and 0.1f+0.2f --
+    if (__fmul_rn(a, b) != 1.0f) m |= EC_ROUNDING;
+    if (__float_as_uint(__fadd_rn(in[4], in[5])) != 0x3E99999Au) m |= EC_ROUNDING;
+
+    // -- FMA must be fused: the product's tail survives the add --
+    if (fmaf(a, b, negone) == 0.0f) m |= EC_FMA_NOT_FUSED;
+
+    // -- sqrt of special values --
+    if ((__float_as_uint(sqrtf(negone)) & 0x7FFFFFFFu) <= 0x7F800000u) m |= EC_SQRT_SPECIAL;
+    if (__float_as_uint(sqrtf(zero)) != 0u) m |= EC_SQRT_SPECIAL;
+    if (__float_as_uint(sqrtf(inf)) != 0x7F800000u) m |= EC_SQRT_SPECIAL;
+
+    // -- 32-bit integer intrinsics with known answers --
+    if (__popc(0xDEADBEEFu) != 24) m |= EC_INT_OPS;
+    if (__clz(0x00F00000u) != 8) m |= EC_INT_OPS;
+    if (__umulhi(0xFFFFFFFFu, 0xFFFFFFFFu) != 0xFFFFFFFEu) m |= EC_INT_OPS;
+    const unsigned d = (unsigned)(seed & 63) + 4u;          // runtime, cannot be folded
+    if ((d * 7u) / d != 7u) m |= EC_INT_OPS;
+    if ((d * 7u + 3u) % d != 3u % d) m |= EC_INT_OPS;
+
+    // -- 64-bit arithmetic --
+    const unsigned long long big = 0x0123456789ABCDEFull;
+    const unsigned long long q = big * (unsigned long long)d;
+    if (q / (unsigned long long)d != big) m |= EC_INT64;
+    if (((q << 3) >> 3) != (q & 0x1FFFFFFFFFFFFFFFull)) m |= EC_INT64;
+
+    // -- warp shuffle butterfly: every lane ends with sum(0..31) = 496 --
+    {
+        float v = (float)(threadIdx.x & 31u);
+        for (int off = 16; off > 0; off >>= 1) v += __shfl_xor_sync(0xFFFFFFFFu, v, off, 32);
+        if (v != 496.0f) m |= EC_SHFL;
+    }
+
+    // -- ballot: even lanes set -> 0x55555555 --
+    if (__ballot_sync(0xFFFFFFFFu, (threadIdx.x & 1u) == 0u) != 0x55555555u) m |= EC_BALLOT;
+
+    // -- shared memory + __syncthreads tree reduction: sum(0..255) = 32640 --
+    sred[threadIdx.x] = threadIdx.x;
+    __syncthreads();
+    for (unsigned s = 128; s > 0; s >>= 1) {
+        if (threadIdx.x < s) sred[threadIdx.x] += sred[threadIdx.x + s];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0 && sred[0] != 32640u) m |= EC_SHARED_REDUCE;
+
+    // -- atomics: the host checks the exact expected totals --
+    atomicAdd(&counters[0], 1u);
+    atomicMax(&counters[1], tid);
+    atomicXor(&counters[3], tid);
+    // One CAS-loop increment per warp: a compare-and-swap retry loop on a single
+    // address from every thread of a 100k-thread grid serialises for seconds.
+    if ((threadIdx.x & 31u) == 0u) {
+        unsigned old = counters[2], assumed;
+        do {
+            assumed = old;
+            old = atomicCAS(&counters[2], assumed, assumed + 1u);
+        } while (assumed != old);
+    }
+
+    if (m) atomicOr(flags, m);
 }
 
 // ---------------------------------------------------------------------------

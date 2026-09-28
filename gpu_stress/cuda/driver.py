@@ -21,9 +21,14 @@ ATTR_MAX_THREADS_PER_BLOCK = 1
 ATTR_L2_CACHE_SIZE = 38
 ATTR_PCI_BUS_ID = 33
 ATTR_PCI_DEVICE_ID = 34
+ATTR_MAX_THREADS_PER_MULTIPROCESSOR = 39
+ATTR_INTEGRATED = 18                # 1 on iGPUs and Grace-Blackwell style parts
+ATTR_UNIFIED_ADDRESSING = 41
+ATTR_ECC_ENABLED = 32
 
 CU_EVENT_DEFAULT = 0
 CUDA_ERROR_OUT_OF_MEMORY = 2
+CU_MEMHOSTALLOC_PORTABLE = 1
 
 
 class CudaError(RuntimeError):
@@ -100,6 +105,8 @@ class DeviceInfo:
     bus_width: int
     l2_bytes: int
     pci_bus_id: str
+    max_threads_per_sm: int = 0
+    integrated: int = 0
 
     @property
     def cc(self) -> str:
@@ -111,6 +118,7 @@ class DeviceInfo:
             "sm_count": self.sm_count, "compute_capability": self.cc,
             "max_sm_clock_mhz": self.clock_khz / 1000, "mem_clock_mhz": self.mem_clock_khz / 1000,
             "bus_width_bits": self.bus_width, "l2_cache_bytes": self.l2_bytes, "pci_bus_id": self.pci_bus_id,
+            "max_threads_per_sm": self.max_threads_per_sm, "integrated": bool(self.integrated),
         }
 
 
@@ -149,6 +157,8 @@ class Context:
             clock_khz=self._attr(ATTR_CLOCK_RATE), mem_clock_khz=self._attr(ATTR_MEMORY_CLOCK_RATE),
             bus_width=self._attr(ATTR_GLOBAL_MEMORY_BUS_WIDTH), l2_bytes=self._attr(ATTR_L2_CACHE_SIZE),
             pci_bus_id=pci.value.decode(),
+            max_threads_per_sm=self._attr(ATTR_MAX_THREADS_PER_MULTIPROCESSOR),
+            integrated=self._attr(ATTR_INTEGRATED),
         )
 
     def mem_info(self) -> tuple[int, int]:
@@ -167,6 +177,10 @@ class Context:
     # -- memory ----------------------------------------------------------------
     def alloc(self, nbytes: int) -> DeviceBuffer:
         return DeviceBuffer(self, nbytes)
+
+    def alloc_host(self, nbytes: int) -> HostBuffer:
+        """Page-locked (pinned) host memory - required for peak PCIe/NVLink rates."""
+        return HostBuffer(self, nbytes)
 
     def synchronize(self) -> None:
         self.drv.call("cuCtxSynchronize")
@@ -221,9 +235,44 @@ class DeviceBuffer:
         count = self.nbytes // 4 if count is None else count
         return list(struct.unpack(f"{count}I", self.download(count * 4)))
 
+    def download_f64(self, count: int | None = None) -> list[float]:
+        count = self.nbytes // 8 if count is None else count
+        return list(struct.unpack(f"{count}d", self.download(count * 8)))
+
     def copy_from(self, src: DeviceBuffer, nbytes: int | None = None) -> None:
         nbytes = min(self.nbytes, src.nbytes) if nbytes is None else nbytes
         self.ctx.drv.call("cuMemcpyDtoDAsync_v2", self.ptr, src.ptr, ctypes.c_size_t(nbytes), None)
+
+    # -- host <-> device transfers timed by the caller ------------------------
+    def from_host(self, host: HostBuffer, nbytes: int | None = None) -> None:
+        nbytes = min(self.nbytes, host.nbytes) if nbytes is None else nbytes
+        self.ctx.drv.call("cuMemcpyHtoD_v2", self.ptr, host.ptr, ctypes.c_size_t(nbytes))
+
+    def to_host(self, host: HostBuffer, nbytes: int | None = None) -> None:
+        nbytes = min(self.nbytes, host.nbytes) if nbytes is None else nbytes
+        self.ctx.drv.call("cuMemcpyDtoH_v2", host.ptr, self.ptr, ctypes.c_size_t(nbytes))
+
+
+class HostBuffer:
+    """Page-locked host allocation (cuMemHostAlloc)."""
+
+    def __init__(self, ctx: Context, nbytes: int) -> None:
+        self.ctx = ctx
+        self.nbytes = nbytes
+        self.ptr = ctypes.c_void_p()
+        ctx.drv.call("cuMemHostAlloc", ctypes.byref(self.ptr), ctypes.c_size_t(nbytes),
+                     CU_MEMHOSTALLOC_PORTABLE)
+
+    def free(self) -> None:
+        if self.ptr.value:
+            self.ctx.lib.cuMemFreeHost(self.ptr)
+            self.ptr.value = 0
+
+    def __enter__(self) -> HostBuffer:
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.free()
 
 
 class Event:
@@ -285,9 +334,28 @@ class Kernel:
         self.fn = fn
         self.name = name
 
+    def blocks_per_sm(self, block: int, shared: int = 0) -> int:
+        """How many blocks of this kernel fit concurrently on one SM."""
+        n = ctypes.c_int()
+        self.ctx.drv.call("cuOccupancyMaxActiveBlocksPerMultiprocessor",
+                          ctypes.byref(n), self.fn, block, ctypes.c_size_t(shared))
+        return max(1, n.value)
+
+    def saturating_grid(self, block: int, n_elems: int | None = None, waves: int = 1, shared: int = 0) -> int:
+        """Grid that exactly fills the GPU for a grid-stride kernel.
+
+        Occupancy-based rather than a fixed blocks-per-SM guess: a 20-SM laptop
+        part and a 132-SM data-centre part both end up fully resident, which is
+        what memory-bound kernels need to reach peak bandwidth.
+        """
+        grid = self.ctx.info.sm_count * self.blocks_per_sm(block, shared) * max(1, waves)
+        if n_elems is not None:
+            grid = min(grid, max(1, (n_elems + block - 1) // block))
+        return max(1, grid)
+
     def launch(self, grid: int | tuple, block: int | tuple, *args, shared: int = 0) -> None:
-        gx, gy, gz = (grid, 1, 1) if isinstance(grid, int) else (tuple(grid) + (1, 1))[:3]
-        bx, by, bz = (block, 1, 1) if isinstance(block, int) else (tuple(block) + (1, 1))[:3]
+        gx, gy, gz = (grid, 1, 1) if isinstance(grid, int) else (*tuple(grid), 1, 1)[:3]
+        bx, by, bz = (block, 1, 1) if isinstance(block, int) else (*tuple(block), 1, 1)[:3]
         cargs = [_to_ctype(a) for a in args]
         ptrs = (ctypes.c_void_p * len(cargs))(*[ctypes.addressof(a) for a in cargs])
         self.ctx.drv.call(

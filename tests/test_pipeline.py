@@ -55,9 +55,24 @@ def test_throttle_only_counted_under_load():
     idle = _samples(util=0.0, throttle=("sw_thermal_slowdown", "sw_power_cap"))
     assert summarize(idle).hard_throttle_pct == 0
     loaded = _samples(throttle=("hw_thermal_slowdown",))
-    s = summarize(loaded)
-    assert s.hard_throttle_pct == 100
-    assert any(f.level == "fail" for f in telemetry_findings(s, RTX4050))
+    assert summarize(loaded).hard_throttle_pct == 100
+
+
+def test_thermal_slowdown_is_believed_only_when_the_temperature_agrees():
+    # 85 C against a 92 C threshold: plausible, so it counts as a real fault.
+    hot = summarize(_samples(temp=85, throttle=("hw_thermal_slowdown",)))
+    assert any(f.level == "fail" and "slowdown active" in f.message
+               for f in telemetry_findings(hot, RTX4050))
+
+    # 60 C against the same threshold: the flag contradicts the thermometer.
+    cool = summarize(_samples(temp=60, throttle=("hw_thermal_slowdown",)))
+    findings = telemetry_findings(cool, RTX4050)
+    assert any(f.level == "info" and "spurious" in f.message for f in findings)
+    assert not any(f.level == "fail" for f in findings)
+
+    # A non-thermal hard reason is always believed - there is no thermometer to check it against.
+    brake = summarize(_samples(temp=60, throttle=("hw_power_brake_slowdown",)))
+    assert any(f.level == "fail" for f in telemetry_findings(brake, RTX4050))
 
 
 def test_clock_dip_rule():

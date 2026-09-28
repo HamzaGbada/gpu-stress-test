@@ -1,0 +1,63 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v0.3.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Check the tag matches the packaged version
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          version=$(uv run python -c "import tomllib;print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          echo "tag=$tag packaged version=$version"
+          test "$tag" = "v$version" || { echo "tag $tag does not match version $version"; exit 1; }
+
+      - name: Tests
+        run: uv run --extra dev python -m pytest tests -q
+
+      - name: Build wheel, sdist and zipapp
+        run: |
+          uv build
+          uv run python scripts/build_zipapp.py dist
+          cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
+
+      - name: Extract the release notes for this tag
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          awk -v v="${tag#v}" '
+            $0 ~ "^## \\[" v "\\]" {flag=1; next}
+            flag && /^## \[/ {exit}
+            flag {print}
+          ' CHANGELOG.md > RELEASE_NOTES.md
+          test -s RELEASE_NOTES.md || echo "See CHANGELOG.md." > RELEASE_NOTES.md
+          cat RELEASE_NOTES.md
+
+      - name: Publish the GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          body_path: RELEASE_NOTES.md
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
+            dist/gpu-stress.pyz
+            dist/SHA256SUMS

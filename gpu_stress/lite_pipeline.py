@@ -18,8 +18,13 @@ def parse_args(argv=None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="GPU stress test & evaluation (no PyTorch, no toolkit needed)")
     p.add_argument("--device", type=int, default=0, help="CUDA device index")
     p.add_argument("--burn", type=float, default=30, help="seconds per sustained burn step (default 30)")
+    p.add_argument("--physics", type=float, default=15, help="seconds per physics step (n-body, stencil; default 15)")
     p.add_argument("--vram", type=float, default=0.9, help="fraction of free VRAM to cover in memtest (default 0.9)")
     p.add_argument("--mem-passes", type=int, default=6, help="memtest patterns (6 fixed + random)")
+    p.add_argument("--mem-max-gb", type=float, default=0,
+                   help="cap the memtest buffer in GiB (0 = no cap; useful on 80-192 GB parts)")
+    p.add_argument("--mem-budget", type=float, default=120,
+                   help="stop the memtest pattern sweep after roughly this many seconds (0 = no limit)")
     p.add_argument("--matmul-size", type=int, default=4096, help="SGEMM N (auto-reduced to fit)")
     p.add_argument("--verify-samples", type=int, default=32, help="rows sampled for SGEMM verification")
     p.add_argument("--reps", type=int, default=20, help="repetitions for timing bandwidth/matmul")
