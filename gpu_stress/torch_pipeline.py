@@ -22,7 +22,7 @@ def _configure_allocator() -> None:
         from importlib.metadata import version
         major, minor = (int(x) for x in version("torch").split("+")[0].split(".")[:2])
         name = "PYTORCH_ALLOC_CONF" if (major, minor) >= (2, 8) else "PYTORCH_CUDA_ALLOC_CONF"
-    except Exception:  # noqa: BLE001
+    except Exception:
         name = "PYTORCH_CUDA_ALLOC_CONF"
     os.environ[name] = "expandable_segments:True"
 

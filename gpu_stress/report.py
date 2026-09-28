@@ -13,6 +13,8 @@ from .pipeline import Context, StepResult, overall_status
 
 def _fmt(v) -> str:
     if isinstance(v, float):
+        if v != 0 and abs(v) < 0.001:
+            return f"{v:.2e}"          # conservation drifts are meaningful at 1e-4 and below
         return f"{v:.3f}" if abs(v) < 1000 else f"{v:,.1f}"
     return str(v)
 
@@ -22,7 +24,8 @@ def key_metrics(r: StepResult) -> str:
     m = r.metrics
     picks = []
     for k in ("tflops", "tflops_mean", "gbs", "gbs_copy_kernel", "errors", "imgs_per_sec", "steps_per_sec",
-              "tested_gb", "batch_size", "dataset_images", "speedup", "gflops"):
+              "tested_gb", "write_gbs", "batch_size", "dataset_images", "speedup", "gflops",
+              "pinned_h2d_gbs", "bodies", "momentum_rel", "side", "sum_drift_rel", "threads"):
         if k in m and m[k] is not None:
             picks.append(f"{k}={_fmt(m[k])}")
     return ", ".join(picks)
@@ -68,7 +71,7 @@ def write_reports(ctx: Context, backend: str, out_dir: str = "results", tag: str
         "python": platform.python_version(),
         "overall": status,
         "device": ctx.device,
-        "config": {k: v for k, v in vars(ctx.config).items()} if hasattr(ctx.config, "__dict__") else {},
+        "config": dict(vars(ctx.config)) if hasattr(ctx.config, "__dict__") else {},
         "steps": [r.as_dict() for r in ctx.results],
         "telemetry_marks": ctx.monitor.marks,
     }
@@ -141,7 +144,7 @@ def plot_telemetry(ctx: Context, path: str | None, show: bool) -> str | None:
     fig.suptitle(f"GPU stress telemetry - {ctx.device.get('name', '')}")
     series = [("util", "GPU util %", (0, 100)), ("mem_pct", "VRAM %", (0, 100)),
               ("temp", "Temp °C", None), ("power_w", "Power W", None)]
-    for ax, (key, label, ylim) in zip(axs, series):
+    for ax, (key, label, ylim) in zip(axs, series, strict=False):
         ax.plot(t, [r[key] for r in rows])
         ax.set_ylabel(label)
         if ylim:
