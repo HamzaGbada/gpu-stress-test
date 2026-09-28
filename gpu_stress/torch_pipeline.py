@@ -52,9 +52,32 @@ def parse_args(argv=None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
+TORCH_MISSING = """\
+gpu-stress: this is the PyTorch pipeline, and PyTorch is not installed.
+
+PyTorch is an optional extra - the base install is dependency-free so the lite
+pipeline works on any machine with a driver. Either:
+
+  * run the zero-dependency pipeline instead:   gpu-stress-lite
+  * or install the extra:
+
+      uv tool install --force "gpu-stress[torch] @ git+https://github.com/HamzaGbada/gpu-stress-test"
+      pipx install "gpu-stress[torch] @ git+https://github.com/HamzaGbada/gpu-stress-test"
+      pip install "gpu-stress[torch] @ git+https://github.com/HamzaGbada/gpu-stress-test"
+
+    or re-run the installer with:  GPU_STRESS_EXTRAS=torch,plot ... | sh
+"""
+
+
 def main(argv=None) -> int:
     args = parse_args(argv)
-    from .torch_steps import OOM, build_steps
+    try:
+        from .torch_steps import OOM, build_steps
+    except ImportError as e:
+        if "torch" not in str(e):
+            raise
+        print(TORCH_MISSING, file=sys.stderr)
+        return 2
     steps = build_steps()
     if args.list:
         for s in steps:

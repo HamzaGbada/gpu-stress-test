@@ -4,6 +4,41 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-09-28
+
+Follow-up to 0.3.0: the installer set up two commands but only one working pipeline.
+
+### Added
+
+* `GPU_STRESS_EXTRAS` for the installer, so the PyTorch pipeline can be installed in the
+  same command:
+
+      GPU_STRESS_EXTRAS=torch,plot curl -fsSL .../install.sh | sh
+
+  Extras are passed as a PEP 508 direct reference (`gpu-stress[torch] @ git+...`), which is
+  the only form that carries them through uv, pipx and pip alike. The closing message now
+  states which commands were actually installed, and the zipapp path warns that a single
+  file cannot carry extras.
+
+### Fixed
+
+* `gpu-stress` crashed with a bare `ModuleNotFoundError: No module named 'torch'` when run
+  without the optional `torch` extra. The console script is always installed, so this was
+  the first thing many users would have hit. It now explains that PyTorch is an opt-in
+  extra, prints the command to add it (or to use `gpu-stress-lite` instead), and exits 2.
+
+### Documentation
+
+* README reorganised for an open-source audience: table of contents, an install section
+  that states which commands each method gives you, an installer-options table, a
+  requirements matrix, a CI section with exit codes and a working workflow snippet, and
+  contributing instructions with the development setup.
+* Corrected the hardware-support table, which claimed more verified hardware than
+  `docs/TESTED_GPUS.md` actually backs. Status is now split into Verified (a report is on
+  file), Reported (reported working, no report filed) and Supported (compatible with the
+  shipped PTX, not yet exercised).
+* Corrected the documented report filenames, which had a `_report` infix the code never wrote.
+
 ## [0.3.0] - 2026-09-28
 
 First tagged release.
@@ -98,6 +133,7 @@ First tagged release.
 
 * Initial scripts: `gpu_bench.py`, `gpu_bench_details.py`, `gpu_stress_cli.py`.
 
+[0.3.1]: https://github.com/HamzaGbada/gpu-stress-test/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/HamzaGbada/gpu-stress-test/releases/tag/v0.3.0
 [0.2.0]: https://github.com/HamzaGbada/gpu-stress-test/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/HamzaGbada/gpu-stress-test/releases/tag/v0.1.0
