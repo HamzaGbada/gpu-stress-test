@@ -178,8 +178,9 @@ def step_compile(ctx: Context) -> dict:
             torch.cuda.synchronize()
             compile_s = time.time() - t0
             t_comp = _timed(lambda: opt(x), ctx.config.reps)
-        except Exception as e:  # noqa: BLE001 - missing triton / unsupported GPU
-            raise StepSkipped(f"torch.compile unavailable: {type(e).__name__}: {str(e)[:120]}")
+        # Missing triton or an unsupported GPU: skip rather than fail the run.
+        except Exception as e:
+            raise StepSkipped(f"torch.compile unavailable: {type(e).__name__}: {str(e)[:120]}") from e
     ctx.log(f"  eager {t_eager * 1000:.3f} ms, compiled {t_comp * 1000:.3f} ms (compile took {compile_s:.1f}s)")
     return {"eager_ms": round(t_eager * 1000, 4), "compiled_ms": round(t_comp * 1000, 4),
             "compile_time_s": round(compile_s, 2), "speedup": round(t_eager / t_comp, 3)}

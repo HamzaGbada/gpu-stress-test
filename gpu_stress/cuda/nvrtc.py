@@ -79,7 +79,8 @@ def build_shipped_ptx() -> None:
     emitted PTX ISA is understood by older drivers.
     """
     here = os.path.dirname(os.path.abspath(__file__))
-    src = open(os.path.join(here, "kernels.cu")).read()
+    with open(os.path.join(here, "kernels.cu")) as f:
+        src = f.read()
     lib = find_nvrtc()
     if lib is None:
         raise SystemExit("libnvrtc not found - install a CUDA toolkit or set CUDA_HOME")
