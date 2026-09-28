@@ -7,17 +7,23 @@
 # `gpu-stress-lite` command and needs nothing but an NVIDIA driver. The PyTorch
 # pipeline (`gpu-stress`) is an optional extra worth several GB of wheels:
 #
-#   GPU_STRESS_EXTRAS=torch,plot curl -fsSL .../install.sh | sh
+#   curl -fsSL .../install.sh | sh -s -- --torch
+#
+# Note the `sh -s --`: options go to the shell running this script. Writing
+#   GPU_STRESS_EXTRAS=torch curl ... | sh
+# does NOT work, because the variable is set for `curl`, not for `sh`. To use the
+# environment instead, put it on the shell: `curl ... | GPU_STRESS_EXTRAS=torch sh`.
 #
 # With uv, pipx or pip present the Python package is installed; otherwise a
 # single-file zipapp is dropped into ~/.local/bin/gpu-stress-lite.
 #
-# Environment:
-#   GPU_STRESS_VERSION  tag to install, or "main" (default: latest release)
-#   GPU_STRESS_METHOD   auto | uv | pipx | pip | zipapp   (default: auto)
-#   GPU_STRESS_EXTRAS   comma list of extras, e.g. torch,plot (default: none)
-#   GPU_STRESS_BIN      install dir for the zipapp        (default: ~/.local/bin)
-#   GPU_STRESS_REPO     owner/name of the GitHub repo
+# Options (or the matching environment variable):
+#   --extras LIST   GPU_STRESS_EXTRAS   comma list, e.g. torch,plot (default: none)
+#   --torch                             shorthand for --extras torch,plot
+#   --version REF   GPU_STRESS_VERSION  tag to install, or "main" (default: latest release)
+#   --method M      GPU_STRESS_METHOD   auto | uv | pipx | pip | zipapp (default: auto)
+#   --bin DIR       GPU_STRESS_BIN      install dir for the zipapp (default: ~/.local/bin)
+#                   GPU_STRESS_REPO     owner/name of the GitHub repo
 set -eu
 
 REPO="${GPU_STRESS_REPO:-HamzaGbada/gpu-stress-test}"
@@ -30,6 +36,43 @@ say()  { printf '%s\n' "$*"; }
 warn() { printf '!  %s\n' "$*" >&2; }
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
+
+usage() {
+    cat <<'USAGE'
+gpu-stress installer
+
+  curl -fsSL <url>/install.sh | sh                      # lite pipeline (no dependencies)
+  curl -fsSL <url>/install.sh | sh -s -- --torch        # + the PyTorch pipeline
+
+Options:
+  --extras LIST    extras to install, e.g. torch,plot
+  --torch          shorthand for --extras torch,plot
+  --version REF    tag to install, or "main" (default: latest release)
+  --method M       auto | uv | pipx | pip | zipapp (default: auto)
+  --bin DIR        install directory for the zipapp (default: ~/.local/bin)
+  -h, --help       show this help
+
+Each option has a matching GPU_STRESS_* environment variable. When piping, set it
+on the shell (`curl ... | GPU_STRESS_EXTRAS=torch sh`), not before curl.
+USAGE
+}
+
+# Options are parsed after the environment, so a flag wins over a variable.
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --extras)   EXTRAS="${2:?--extras needs a value, e.g. --extras torch,plot}"; shift 2 ;;
+        --extras=*) EXTRAS="${1#*=}"; shift ;;
+        --torch)    EXTRAS="torch,plot"; shift ;;
+        --version)   VERSION="${2:?--version needs a value, e.g. --version v0.3.2}"; shift 2 ;;
+        --version=*) VERSION="${1#*=}"; shift ;;
+        --method)   METHOD="${2:?--method needs a value}"; shift 2 ;;
+        --method=*) METHOD="${1#*=}"; shift ;;
+        --bin)      BIN_DIR="${2:?--bin needs a value}"; shift 2 ;;
+        --bin=*)    BIN_DIR="${1#*=}"; shift ;;
+        -h|--help)  usage; exit 0 ;;
+        *)          usage >&2; die "unknown option: $1" ;;
+    esac
+done
 
 # ---------------------------------------------------------------- environment
 case "$(uname -s)" in
@@ -143,7 +186,8 @@ case "$EXTRAS" in
     *)
         say ""
         say "The PyTorch pipeline (gpu-stress) is not installed: it pulls several GB of"
-        say "wheels, so it is an opt-in extra. To add it, re-run with:"
-        say "  GPU_STRESS_EXTRAS=torch,plot   (plot also enables telemetry PNGs)"
+        say "wheels, so it is an opt-in extra. To add it, re-run with --torch:"
+        say ""
+        say "  curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | sh -s -- --torch"
         ;;
 esac

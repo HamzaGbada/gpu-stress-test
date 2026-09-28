@@ -8,7 +8,7 @@
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![NVIDIA Driver R545+](https://img.shields.io/badge/NVIDIA%20driver-R545%2B-76b900.svg)](https://www.nvidia.com/drivers)
-[![Version](https://img.shields.io/badge/version-0.3.1-informational.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.3.2-informational.svg)](CHANGELOG.md)
 
 Correctness checks, memory tests, sustained load, physics-based workloads and live telemetry —
 reduced to a single verdict: **PASS / WARN / FAIL**.
@@ -79,23 +79,33 @@ anywhere a driver does. The PyTorch pipeline is an opt-in extra worth several GB
 | Command | Installed by default | What it needs |
 |---|:---:|---|
 | `gpu-stress-lite` | ✅ | NVIDIA driver only |
-| `gpu-stress` | opt-in | `GPU_STRESS_EXTRAS=torch` (pulls `torch` + `torchvision`) |
+| `gpu-stress` | opt-in | the `torch` extra (pulls `torch` + `torchvision`) |
+
+To get both pipelines, pass `--torch` to the installer:
 
 ```bash
-# both pipelines, plus telemetry plots
-GPU_STRESS_EXTRAS=torch,plot curl -fsSL https://raw.githubusercontent.com/HamzaGbada/gpu-stress-test/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/HamzaGbada/gpu-stress-test/main/install.sh | sh -s -- --torch
 ```
+
+> **The `sh -s --` matters.** Options belong to the shell that runs the script.
+> `VAR=value curl ... | sh` sets the variable for **curl**, not for `sh`, so the installer
+> never sees it. If you prefer environment variables, put them on the shell:
+> `curl ... | GPU_STRESS_EXTRAS=torch,plot sh`.
 
 Running `gpu-stress` without the extra prints the one-line command to add it rather than a traceback.
 
 ### Installer options
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `GPU_STRESS_EXTRAS` | *(none)* | Extras to include, e.g. `torch,plot` |
-| `GPU_STRESS_METHOD` | `auto` | Force `uv`, `pipx`, `pip` or `zipapp` |
-| `GPU_STRESS_VERSION` | latest release | Pin a tag, e.g. `v0.3.1`, or `main` |
-| `GPU_STRESS_BIN` | `~/.local/bin` | Install directory for the zipapp |
+Every option is a flag or the matching environment variable; the flag wins.
+
+| Flag | Variable | Default | Purpose |
+|---|---|---|---|
+| `--extras LIST` | `GPU_STRESS_EXTRAS` | *(none)* | Extras to include, e.g. `torch,plot` |
+| `--torch` | — | — | Shorthand for `--extras torch,plot` |
+| `--method M` | `GPU_STRESS_METHOD` | `auto` | Force `uv`, `pipx`, `pip` or `zipapp` |
+| `--version REF` | `GPU_STRESS_VERSION` | latest release | Pin a tag, e.g. `v0.3.2`, or `main` |
+| `--bin DIR` | `GPU_STRESS_BIN` | `~/.local/bin` | Install directory for the zipapp |
+| `--help` | — | — | Show usage |
 
 The installer prefers `uv`, then `pipx`, then `pip`. With none of them available it falls back to a
 standalone **~180 KB zipapp** — a single executable file with no pip, virtualenv or dependencies.
@@ -110,8 +120,8 @@ pip install ".[torch,plot]"      # + PyTorch pipeline and telemetry plots
 uv sync --extra torch --extra plot
 
 # straight from git, no clone
-uv tool install "git+https://github.com/HamzaGbada/gpu-stress-test@v0.3.1"
-uv tool install "gpu-stress[torch] @ git+https://github.com/HamzaGbada/gpu-stress-test@v0.3.1"
+uv tool install "git+https://github.com/HamzaGbada/gpu-stress-test@v0.3.2"
+uv tool install "gpu-stress[torch] @ git+https://github.com/HamzaGbada/gpu-stress-test@v0.3.2"
 
 # single file, nothing installed
 curl -fsSLO https://github.com/HamzaGbada/gpu-stress-test/releases/latest/download/gpu-stress.pyz
@@ -150,6 +160,7 @@ architectures newer than this release.
 | Jetson, other unified memory | varies                      |         shared |  ✅   |  ⚠️   | 🔵 Supported        |
 | Volta · Turing               | sm_70 / sm_75               |         varies |  ✅¹  |   ✅   | 🔵 Supported        |
 | Pascal and older             | ≤ sm_61                     |         varies | ⚠️²  |   ✅   | 🟡 Rebuild required |
+
 
 <sub>
 🟢 <b>Verified</b> — a full run is on file in <a href="docs/TESTED_GPUS.md">docs/TESTED_GPUS.md</a> ·
