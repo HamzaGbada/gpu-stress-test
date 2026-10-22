@@ -4,6 +4,35 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-10-22
+
+Scoring fixes found in the first RTX 4090 and Tesla T4 runs. The kernels, the measurements and
+the correctness checks are unchanged; some efficiency percentages and two PyTorch `matmul`
+thresholds are.
+
+### Fixed
+
+* **The `matmul` steps could score above 100% of peak.** They take about a second, and were scored
+  at the mean clock of their NVML samples, most of which were taken at idle clock while buffers were
+  set up. An RTX 4090's cuBLAS FP32 came out at "150% of theoretical". Both `matmul` steps are now
+  scored at the highest clock seen in the step, which gives a lower bound. The PyTorch FP32 levels
+  move to warn under 25% and fail under 10% to match: healthy cards measure 40–62% on this basis.
+* **`fp16_burn` on Volta and Turing** was compared with the FP32 rate, so a Tesla T4's 13.4
+  TFLOPS was reported unscored as "above the assumed peak". These GPUs, GP100 and the Tegra parts
+  run packed FP16 at 2× FP32, and are now scored against that (the T4 measures 95%).
+* The informational efficiency line called the driver's maximum SM clock the "rated boost clock".
+  On GeForce boards that clock is well above the advertised boost (RTX 4090: 3105 MHz, against
+  2520), so the line now names the clock it uses.
+
+### Documentation
+
+* `docs/TESTED_GPUS.md` lists every GPU the suite has been run on: B200, H200, H100, A100, DGX
+  Spark, RTX 5090, 4090, 4050, 3080 and 3060, and a Tesla T4 on Google Colab. Full results are added
+  for the RTX 4090 and the T4.
+* N-body momentum drift depends on the body count, not the GPU, so values are only comparable
+  between cards that ran the same count. This is now documented with the thresholds.
+* Use `--precision fp16` on Volta and Turing, which have no bf16 tensor cores.
+
 ## [0.4.0] - 2026-10-22
 
 Bug-fix and documentation release. Two changes can affect scripts that call the tool: a run that
@@ -208,6 +237,7 @@ First tagged release.
 
 * Initial scripts: `gpu_bench.py`, `gpu_bench_details.py`, `gpu_stress_cli.py`.
 
+[0.4.1]: https://github.com/HamzaGbada/gpu-stress-test/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/HamzaGbada/gpu-stress-test/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/HamzaGbada/gpu-stress-test/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/HamzaGbada/gpu-stress-test/compare/v0.3.0...v0.3.1

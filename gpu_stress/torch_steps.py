@@ -16,6 +16,7 @@ from torch import nn
 
 from .evaluate import (
     Finding,
+    burst_fp32_peak,
     compute_error_finding,
     efficiency_finding,
     stability_finding,
@@ -152,8 +153,11 @@ def eval_matmul(m, t, ctx) -> list[Finding]:
     else:
         out.append(Finding("info", "matmul precision sweep: results consistent with fp32"))
     if m.get("fp32"):
-        out += efficiency_finding(m["fp32"]["tflops"], theoretical_fp32_tflops(ctx.device, t.sm_clock_mean), "TFLOPS",
-                                  "cuBLAS FP32 at observed clock", warn_below=0.4, fail_below=0.2)
+        # Healthy cards measure 40-62% against this peak (RTX 4050 at 60 W, T4, RTX 4090):
+        # it is a lower bound, see burst_fp32_peak.
+        peak, at = burst_fp32_peak(ctx.device, t, m["fp32"]["tflops"])
+        out += efficiency_finding(m["fp32"]["tflops"], peak, "TFLOPS", f"cuBLAS FP32 {at}",
+                                  warn_below=0.25, fail_below=0.1)
     fast = max((m[k]["tflops"] for k in ("tf32", "bf16", "fp16") if k in m), default=None)
     if fast and m.get("fp32"):
         ratio = fast / m["fp32"]["tflops"]

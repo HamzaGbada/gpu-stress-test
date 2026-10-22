@@ -41,6 +41,25 @@ def theoretical_fp32_tflops(device: dict, clock_mhz: float | None = None) -> flo
     return sm * cores * 2 * clk * 1e6 / 1e12
 
 
+def burst_fp32_peak(device: dict, t: WindowSummary, measured: float) -> tuple[float | None, str]:
+    """FP32 peak for scoring a measurement that is over in about a second, and
+    which clock it assumes.
+
+    The mean clock suits the sustained steps, not these: a short window holds
+    a few samples, some taken at idle clock while buffers were being set up,
+    so the mean undershoots the clock the work ran at (an RTX 4090 matmul
+    scored 150% of peak that way). Use the highest clock the window saw, or
+    the maximum clock if no sample landed while the GPU was busy. Either is
+    at or above the clock the work ran at, so the efficiency is a lower
+    bound: a power-capped board scores low here (an RTX 4050 at 60 W ran
+    its FP32 matmul near 1700 MHz but peaked at 2565 MHz in the same step).
+    """
+    peak = theoretical_fp32_tflops(device, t.sm_clock_max)
+    if t.sm_clock_max and peak and measured <= peak:
+        return peak, f"at peak observed {t.sm_clock_max} MHz"
+    return theoretical_fp32_tflops(device), "at maximum clock"
+
+
 def theoretical_bandwidth_gbs(device: dict) -> float | None:
     """GDDR: data rate = 2 x memory clock (NVML/driver report the I/O clock).
 
@@ -115,7 +134,7 @@ def telemetry_findings(t: WindowSummary, device: dict) -> list[Finding]:
             # expected when the board is power-capped (laptops, low TDP limits) - only warn otherwise
             power_capped = "sw_power_cap" in t.throttle_reasons and t.throttle_pct >= 50
             out.append(Finding("info" if power_capped else "warn",
-                               f"mean SM clock {t.sm_clock_mean:.0f} MHz is below 60% of rated {max_clk} MHz"
+                               f"mean SM clock {t.sm_clock_mean:.0f} MHz is below 60% of the {max_clk} MHz maximum"
                                + (" (power limit)" if power_capped else "")))
 
     limit = device.get("power_limit_w")

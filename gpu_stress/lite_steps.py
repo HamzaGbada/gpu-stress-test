@@ -10,6 +10,7 @@ from .cuda import driver as cu
 from .cuda.driver import CudaOutOfMemory, f32, i32, u32, u64
 from .evaluate import (
     Finding,
+    burst_fp32_peak,
     compute_error_finding,
     efficiency_finding,
     stability_finding,
@@ -353,9 +354,9 @@ def step_matmul(ctx: Context) -> dict:
 
 def eval_matmul(m: dict, t, ctx: Context) -> list[Finding]:
     out = compute_error_finding(m["errors"], f"{m['verified']} sampled SGEMM outputs")
-    peak = theoretical_fp32_tflops(ctx.device, t.sm_clock_mean)
+    peak, at = burst_fp32_peak(ctx.device, t, m["tflops"])
     # a hand-written register-tiled kernel reaches ~25-50% of peak; warn only if far below
-    out += efficiency_finding(m["tflops"], peak, "TFLOPS", "SGEMM at observed clock", warn_below=0.12, fail_below=0.05)
+    out += efficiency_finding(m["tflops"], peak, "TFLOPS", f"SGEMM {at}", warn_below=0.12, fail_below=0.05)
     return out
 
 
@@ -423,8 +424,11 @@ def _peak_findings(measured: float, ratio_to_fp32: float, t, ctx: Context, what:
                                 f"assumes for this part (GeForce ratios) - reported, not scored")]
     out = efficiency_finding(measured, peak, "TFLOPS",
                              f"{what} at observed {t.sm_clock_mean or 0:.0f} MHz", warn_below=0.55, fail_below=0.3)
+    # The maximum clock is the top of the board's clock table. GeForce boards
+    # list it well above the advertised boost (RTX 4090: 3105 vs 2520 MHz).
     if rated and observed and abs(rated - observed) / rated > 0.05:
-        out.append(Finding("info", f"{what}: {100 * measured / (rated * ratio_to_fp32):.0f}% of rated boost-clock peak "
+        out.append(Finding("info", f"{what}: {100 * measured / (rated * ratio_to_fp32):.0f}% of the peak at the "
+                                   f"{ctx.device.get('max_sm_clock_mhz')} MHz maximum clock "
                                    f"({rated * ratio_to_fp32:.1f} TFLOPS)"))
     return out
 
@@ -450,12 +454,18 @@ def step_fp16_burn(ctx: Context) -> dict:
                  lambda v, i: sum(1 for x in v if not (abs(x - 1.0) < 2e-2)), "FP16x2 FMA burn", extra_args=(0.5,))
 
 
+# Packed FP16 (non tensor-core) throughput relative to FP32, by compute capability.
+# GP100, the Tegra parts, Volta and Turing run it at 2x (a T4 measured 95% of
+# that); GP10x GeForce runs it at 1/64. Anything else is assumed to run it at the
+# FP32 rate, as Ampere GA10x, Ada and Blackwell GeForce do. Faster parts (A100,
+# H100, B200) then land above the assumed peak and are reported, not scored.
+FP16_RATIO = {(6, 0): 2.0, (6, 1): 1 / 64, (6, 2): 2.0, (7, 0): 2.0, (7, 2): 2.0, (7, 5): 2.0}
+
+
 def eval_fp16_burn(m: dict, t, ctx: Context) -> list[Finding]:
     out = compute_error_finding(m["errors"], "FP16 FMA chains")
-    # Packed fp16 (non tensor-core) runs at the FP32 rate on Ampere/Ada/Blackwell
-    # consumer parts, but at 1/64 of it on GP10x Pascal (sm_61).
     cc = (ctx.device.get("cc_major"), ctx.device.get("cc_minor"))
-    out += _peak_findings(m["tflops_mean"], 1 / 64 if cc == (6, 1) else 1.0, t, ctx, "sustained FP16x2")
+    out += _peak_findings(m["tflops_mean"], FP16_RATIO.get(cc, 1.0), t, ctx, "sustained FP16x2")
     out += stability_finding(m["tflops_first"], m["tflops_last"], "TFLOPS", "FP16 throughput")
     return out
 
@@ -579,7 +589,9 @@ def eval_nbody(m: dict, t, ctx: Context) -> list[Finding]:
            f"({m['bodies']} bodies)")
     # Healthy fp32 drift measured on an RTX 4050: 1.9e-4 over 2k steps, 3.4e-4 over
     # 13k - it grows sub-linearly because rsqrtf is approximate and d2(i,j) differs
-    # from d2(j,i) by an ulp, so the pairwise cancellation is never exact. A GPU
+    # from d2(j,i) by an ulp, so the pairwise cancellation is never exact. That is
+    # at the 4050's 20480 bodies, the worst case on file: from 40960 bodies up the
+    # drift stays near 1e-7 (T4, RTX 4090, and the 4050 itself run at 40960). A GPU
     # actually computing forces wrong loses the antisymmetry outright and lands
     # near O(1), so these thresholds sit ~30x above the healthy band.
     if rel > 1e-1:

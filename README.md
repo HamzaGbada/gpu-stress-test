@@ -101,7 +101,7 @@ and the run takes its worst step.
   enough.
 - **Throughput is compared with the GPU's own peak at the clock it actually ran at**, not with a
   list of other GPUs. A power-capped laptop part therefore scores on what it can do under its cap;
-  the comparison with the rated boost clock is reported as info.
+  the comparison with the peak at the card's maximum clock is reported as info.
 - **Sustained loads are also watched through NVML.** Within 8 °C of the slowdown temperature warns,
   within 2 °C fails. Thermal or hardware slowdown warns, and fails when it is active in 10% or more
   of the loaded samples. A throughput drop of more than 10% from start to end warns, more than 25%
@@ -138,7 +138,8 @@ For numbers you can compare across cards and reproduce later:
    ```
 
    Two minutes per load lets clocks and temperatures settle; the 30 s default mostly shows boost
-   behaviour.
+   behaviour. On Volta and Turing (V100, T4) use `--precision fp16`: their tensor cores have no
+   bf16 (a T4 runs bf16 matmul at 2.2 TFLOPS, fp16 at 21.8).
 
 4. **Read the numbers that describe the card.** In the JSON report, per step: `tflops_mean` for the
    burns and `nbody`, `gbs` for `bandwidth`, `pcie` and `stencil`, `tflops_first` against
@@ -159,8 +160,9 @@ jq -r '.device.name as $gpu | .steps[] | [$gpu, .name, .status, (.metrics.tflops
 Two caveats for data-centre parts. `tensor_burn` uses `mma.sync`, which Hopper and data-centre
 Blackwell run below their full tensor rate (that needs `wgmma` / `tcgen05`), so on those parts treat
 its TFLOPS as a stability load and use the cuBLAS `matmul` numbers for peak tensor throughput. And
-the evaluator only knows the GeForce FP16 and tensor-core ratios (1× and 2× FP32). When a part beats
-them, those steps report the measured TFLOPS without a percentage. The correctness checks are not
+the evaluator knows the FP16 rates of GeForce, Pascal, Volta and Turing parts and the GeForce
+tensor-core rate (2× FP32), not the faster data-centre units. When a part beats the assumed rate,
+those steps report the measured TFLOPS without a percentage. The correctness checks are not
 affected.
 
 ## Usage
@@ -247,7 +249,7 @@ variable on `sh`, not on `curl` (`curl ... | GPU_STRESS_EXTRAS=torch sh`).
 |---|---|---|---|
 | `--torch` | | | Same as `--extras torch,plot` |
 | `--extras LIST` | `GPU_STRESS_EXTRAS` | none | Extras to install: `torch`, `plot` |
-| `--version REF` | `GPU_STRESS_VERSION` | latest release | A tag such as `v0.4.0`, or `main` |
+| `--version REF` | `GPU_STRESS_VERSION` | latest release | A tag such as `v0.4.1`, or `main` |
 | `--method M` | `GPU_STRESS_METHOD` | `auto` | `uv`, `pipx`, `pip` or `zipapp` |
 | `--bin DIR` | `GPU_STRESS_BIN` | `~/.local/bin` | Where the zipapp goes |
 
@@ -255,8 +257,8 @@ variable on `sh`, not on `curl` (`curl ... | GPU_STRESS_EXTRAS=torch sh`).
 
 ```bash
 # uv or pipx, straight from git
-uv tool install "git+https://github.com/HamzaGbada/gpu-stress-test@v0.4.0"
-uv tool install "gpu-stress[torch,plot] @ git+https://github.com/HamzaGbada/gpu-stress-test@v0.4.0"
+uv tool install "git+https://github.com/HamzaGbada/gpu-stress-test@v0.4.1"
+uv tool install "gpu-stress[torch,plot] @ git+https://github.com/HamzaGbada/gpu-stress-test@v0.4.1"
 
 # single file, nothing installed (lite pipeline; `torch` as first argument runs the PyTorch suite if torch is importable)
 curl -fsSLO https://github.com/HamzaGbada/gpu-stress-test/releases/latest/download/gpu-stress.pyz
@@ -281,21 +283,22 @@ No CUDA toolkit is needed, except for `--nvrtc`.
 
 `gpu-stress-lite` ships its kernels as PTX for `compute_70` and `compute_80`. The driver compiles
 that PTX for the GPU it finds, so architectures released after this version run without a rebuild:
-the GB10 below runs the `compute_80` PTX.
+the B200, H100 and DGX Spark below all run the `compute_80` PTX.
 
-| Architecture | `gpu-stress-lite` | Runs on file |
+| Architecture | `gpu-stress-lite` | Tested on |
 |---|---|---|
-| Blackwell (sm_100, sm_120, sm_121) | all steps | GB10 / DGX Spark (verified) · RTX 5090 (PyTorch suite, reported) |
-| Hopper (sm_90) | all steps | |
-| Ada (sm_89) | all steps | RTX 4050 Laptop (both suites, verified) |
-| Ampere (sm_80, sm_86, sm_87) | all steps | |
-| Volta, Turing (sm_70, sm_75) | all except `tensor_burn`, which needs sm_80 | |
+| Blackwell (sm_100, sm_120, sm_121) | all steps | B200 · RTX 5090 · DGX Spark (GB10) |
+| Hopper (sm_90) | all steps | H100 · H200 |
+| Ada (sm_89) | all steps | RTX 4090 · RTX 4050 Laptop |
+| Ampere (sm_80, sm_86, sm_87) | all steps | A100 · RTX 3080 · RTX 3060 |
+| Volta, Turing (sm_70, sm_75) | all except `tensor_burn`, which needs sm_80 | Tesla T4 (Google Colab) |
 | Pascal (sm_60, sm_61) | with `--nvrtc` and a CUDA 12.x toolkit; no `tensor_burn` | |
 | Maxwell and older | not supported | |
 
-*Verified* means a full run is recorded in [docs/TESTED_GPUS.md](docs/TESTED_GPUS.md); *reported*
-means it was reported working without a run on file. `gpu-stress` runs wherever your PyTorch build
-supports the GPU.
+Drivers, and the full results recorded so far (RTX 4090, RTX 4050 Laptop, Tesla T4, DGX Spark), are in
+[docs/TESTED_GPUS.md](docs/TESTED_GPUS.md). On data-centre parts, read the
+[caveats](#benchmarking-a-new-gpu) about FP16 and tensor-core figures. `gpu-stress` runs wherever
+your PyTorch build supports the GPU.
 
 **Unified-memory parts** (DGX Spark / GB10, Jetson, integrated GPUs) report a memory bus width of
 zero, so there is no theoretical bandwidth to score against: `bandwidth` and `stencil` report the

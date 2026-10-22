@@ -63,7 +63,7 @@ while [ $# -gt 0 ]; do
         --extras)   EXTRAS="${2:?--extras needs a value, e.g. --extras torch,plot}"; shift 2 ;;
         --extras=*) EXTRAS="${1#*=}"; shift ;;
         --torch)    EXTRAS="torch,plot"; shift ;;
-        --version)   VERSION="${2:?--version needs a value, e.g. --version v0.4.0}"; shift 2 ;;
+        --version)   VERSION="${2:?--version needs a value, e.g. --version v0.4.1}"; shift 2 ;;
         --version=*) VERSION="${1#*=}"; shift ;;
         --method)   METHOD="${2:?--method needs a value}"; shift 2 ;;
         --method=*) METHOD="${1#*=}"; shift ;;

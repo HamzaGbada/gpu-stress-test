@@ -1,9 +1,12 @@
 """GPU-independent tests: evaluation rules, telemetry summaries, runner isolation."""
 import argparse
 import functools
+import pathlib
+import re
 
 import pytest
 
+from gpu_stress import __version__
 from gpu_stress.evaluate import (
     Finding,
     efficiency_finding,
@@ -148,3 +151,9 @@ def test_summary_shows_each_number_once():
     assert key_metrics(r) == "tflops=11.000, errors=0"
     r = StepResult("bandwidth", "pass", 1.0, {"gbs": 173.0, "gbs_copy_kernel": 173.0})
     assert key_metrics(r) == "gbs=173.000"
+
+
+def test_version_matches_pyproject():
+    # The release workflow checks the tag against pyproject.toml only; --version prints __version__.
+    pyproject = (pathlib.Path(__file__).parent.parent / "pyproject.toml").read_text()
+    assert __version__ == re.search(r'^version = "([^"]+)"', pyproject, re.M).group(1)

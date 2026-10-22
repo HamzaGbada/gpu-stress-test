@@ -10,13 +10,14 @@ import re
 import struct
 
 from gpu_stress.cuda import read_kernel_file
-from gpu_stress.evaluate import PCIE_LANE_GBS, theoretical_bandwidth_gbs, theoretical_pcie_gbs
+from gpu_stress.evaluate import PCIE_LANE_GBS, burst_fp32_peak, theoretical_bandwidth_gbs, theoretical_pcie_gbs
 from gpu_stress.lite_steps import (
     EDGE_BITS,
     EDGE_INPUTS,
     KERNEL_NAMES,
     eval_edge_cases,
     eval_fp16_burn,
+    eval_matmul,
     eval_memtest,
     eval_nbody,
     eval_pcie,
@@ -185,6 +186,8 @@ def test_stencil_heat_conservation_levels():
 # ---------------------------------------------------------------------------
 A100 = {"sm_count": 108, "cores_per_sm": 64, "max_sm_clock_mhz": 1410, "cc_major": 8, "cc_minor": 0}
 GTX1080 = {"sm_count": 20, "cores_per_sm": 128, "max_sm_clock_mhz": 1733, "cc_major": 6, "cc_minor": 1}
+T4 = {"sm_count": 40, "cores_per_sm": 64, "max_sm_clock_mhz": 1590, "cc_major": 7, "cc_minor": 5}
+RTX4090 = {"sm_count": 128, "cores_per_sm": 128, "max_sm_clock_mhz": 3105, "cc_major": 8, "cc_minor": 9}
 
 
 def _burn_metrics(tflops):
@@ -215,6 +218,38 @@ def test_fp16_burn_expects_the_1_64_rate_on_gp10x_pascal():
     # FP32 peak 8.9 TFLOPS at 1733 MHz; packed FP16 runs at 1/64 of that.
     findings = eval_fp16_burn(_burn_metrics(0.13), _window(1733), _ctx(GTX1080))
     assert not any(f.level in ("warn", "fail") for f in findings)
+
+
+def test_fp16_burn_expects_the_2x_rate_on_turing():
+    # A Colab T4 at 1378 MHz: FP32 peak 7.1 TFLOPS, packed FP16 twice that.
+    assert _efficiency_levels(eval_fp16_burn(_burn_metrics(13.4), _window(1378), _ctx(T4))) == ["info"]
+    assert _efficiency_levels(eval_fp16_burn(_burn_metrics(7.0), _window(1378), _ctx(T4))) == ["warn"]
+
+
+# ---------------------------------------------------------------------------
+# short measurements (matmul)
+# ---------------------------------------------------------------------------
+def _short_window(clocks):
+    """A sub-second step: NVML samples taken at idle clock while buffers were set up, then under load."""
+    return summarize([Sample(t=i * 0.25, util=0.0, temp=55, power_w=16.0 if c < 1000 else 155.0, sm_clock=c)
+                      for i, c in enumerate(clocks)])
+
+
+def test_short_matmul_is_scored_at_the_clock_the_work_ran_at():
+    # Real RTX 4090 run: the mean of these samples is 1125 MHz, which put
+    # cuBLAS FP32 at 150% of peak. At 2715 MHz the peak is 89.0 TFLOPS.
+    peak, at = burst_fp32_peak(RTX4090, _short_window([330, 330, 2715]), 55.1)
+    assert round(peak, 1) == 89.0 and "2715 MHz" in at
+
+    findings = eval_matmul({"errors": 0, "verified": 128, "tflops": 30.4},
+                           _short_window([330, 330, 2730]), _ctx(RTX4090))
+    assert [f.level for f in findings if "SGEMM at" in f.message] == ["info"]
+    assert any("34% of theoretical" in f.message for f in findings)
+
+
+def test_short_matmul_with_no_loaded_sample_uses_the_maximum_clock():
+    peak, at = burst_fp32_peak(RTX4090, _short_window([330, 330]), 55.1)
+    assert round(peak, 1) == 101.7 and at == "at maximum clock"
 
 
 # ---------------------------------------------------------------------------

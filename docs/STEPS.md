@@ -19,9 +19,16 @@ all (no driver, no GPU, a bad `--device`, an unknown name in `--steps` or `--ski
 
 Throughput rules compare a measurement with what this GPU can do in theory:
 
-- FP32: SMs × FP32 cores per SM × 2 × SM clock. The clock is the **mean clock NVML observed
-  during the step**, so a board held down by its power limit is scored on what it can do under that
-  limit. A second, informational line compares with the rated boost clock.
+- FP32: SMs × FP32 cores per SM × 2 × SM clock. For the sustained steps the clock is the **mean
+  clock NVML observed during the step**, so a board held down by its power limit is scored on what
+  it can do under that limit. A second, informational line compares with the peak at the maximum
+  clock the driver reports. On GeForce boards that is the top of the clock table, well above the
+  advertised boost clock: an RTX 4090 reports 3105 MHz (101.7 TFLOPS), where NVIDIA's specification
+  quotes 2520 MHz (82.6 TFLOPS).
+- The two `matmul` steps finish in about a second, too fast to be sampled reliably: NVML refreshes
+  about every half second, and the first samples are taken at idle clock while buffers are set up.
+  They are scored at the **highest clock seen in the step** (the maximum clock if no sample landed
+  under load). That is at or above the clock the work ran at, so their efficiency is a lower bound.
 - Memory: 2 × memory clock × bus width / 8. Unified-memory parts report a bus width of 0, so there
   is no peak and the measurement is reported as info.
 - PCIe: per-lane rate × width, for the generation and width the link is trained to while the
@@ -109,10 +116,11 @@ bit for bit.
 | Condition | Level |
 |---|---|
 | Any sampled output differs | fail |
-| Under 5% of the FP32 peak | fail |
+| Under 5% of the FP32 peak at the highest clock seen in the step | fail |
 | Under 12% | warn |
 
 The efficiency bar is low on purpose: a hand-written kernel without tensor cores is not cuBLAS.
+Healthy GPUs land at 30–35%.
 
 ### `edge_cases`
 
@@ -154,8 +162,10 @@ Outputs are checked every tenth launch and after the last one.
 | Under 55% | warn |
 | Start-to-end drop (see [stability](#stability-over-a-sustained-run)) | warn / fail |
 
-The peak is the FP32 peak for `fp32_burn` and `fp16_burn` (1/64 of it for `fp16_burn` on GP10x
-Pascal, sm_61), and twice the FP32 peak for `tensor_burn`. Those are the GeForce rates. Data-centre
+The peak is the FP32 peak for `fp32_burn`, and twice the FP32 peak for `tensor_burn`. For
+`fp16_burn` it is twice the FP32 peak on Volta and Turing (sm_70, sm_72, sm_75), GP100 and Tegra
+Pascal (sm_60, sm_62), 1/64 of it on GP10x Pascal (sm_61), and the FP32 peak on everything else, which
+is the rate of Ampere GA10x, Ada and Blackwell GeForce parts. Data-centre
 parts have faster FP16 and tensor units (an A100 runs FP16 tensor maths at 16× its FP32 rate), so
 when a measurement comes out more than 15% above the assumed peak, the step reports the TFLOPS as
 info and does not score it. On Hopper and data-centre Blackwell, `mma.sync` itself runs below the
@@ -165,8 +175,10 @@ full tensor rate, which needs `wgmma` / `tcgen05`.
 
 Direct O(N²) gravity on 1024 bodies per SM (8192 to 131072), unit masses at rest in a sphere, so
 the total momentum starts at exactly zero. Forces between two bodies are equal and opposite, so it
-must stay there; fp32 rounding and the approximate `rsqrtf` let it drift by about 10⁻⁴ of the
-total momentum magnitude on healthy hardware. Runs for `--physics` seconds (15).
+must stay there; fp32 rounding and the approximate `rsqrtf` let it drift on healthy hardware. How
+far depends on the body count, not the GPU: 20480 bodies drift to 2–3×10⁻⁴ of the total momentum
+magnitude, 40960 and more stay near 10⁻⁷. Compare the drift only between cards that ran the same
+body count. Runs for `--physics` seconds (15).
 
 | Condition | Level |
 |---|---|
@@ -210,7 +222,7 @@ Allocates and frees 16 MiB, 64 MiB, 256 MiB and 1 GiB buffers 20 times each, the
 |---|---|---|
 | `system_info` | torch, CUDA runtime and cuDNN versions, device facts, allocator settings | none |
 | `bandwidth` | `copy_` of up to 1 GiB | fail under 30% of the memory peak, warn under 60% |
-| `matmul` | `--matmul-size` (8192, halved to fit) in FP32, TF32, BF16 and FP16; a 64 × 64 corner is compared with an FP32 reference | fail if non-finite or the max relative error exceeds 10⁻⁴ (FP32), 5×10⁻² (TF32, FP16) or 10⁻¹ (BF16); FP32 fail under 20% of peak, warn under 40%; warn if the fastest reduced precision is under 1.5× FP32 on CC 7.0+ |
+| `matmul` | `--matmul-size` (8192, halved to fit) in FP32, TF32, BF16 and FP16; a 64 × 64 corner is compared with an FP32 reference | fail if non-finite or the max relative error exceeds 10⁻⁴ (FP32), 5×10⁻² (TF32, FP16) or 10⁻¹ (BF16); FP32 fail under 10%, warn under 25% of the peak at the highest clock seen in the step; warn if the fastest reduced precision is under 1.5× FP32 on CC 7.0+ |
 | `compile` | Eager vs `torch.compile` on a 4096-wide two-layer MLP | warn if compiled is slower than 0.8× eager; skipped when `torch.compile` is unavailable |
 | `matmul_burn` | Matmul in `--precision` for `--burn` seconds | fail on NaN/inf output (checked every 20th sample); start-to-end drop |
 | `training` | ResNet50 + Adam on an in-VRAM synthetic dataset, `--epochs` epochs | warn if the batch had to shrink or an OOM was recovered; fail on NaN/inf loss; warn if the loss grows by 1.5×; drop between first and last epoch |
@@ -225,4 +237,6 @@ fits. It then records the persistent memory (weights, gradients, optimizer state
 transient peak (activations, workspace), and sizes the synthetic dataset from what is still free
 after that, minus a margin of 6% of the card or 256 MiB. An out-of-memory error later in training
 halves the batch again instead of ending the step. `--precision bf16` roughly halves the activation
-memory, which usually keeps the requested batch on small cards.
+memory, which usually keeps the requested batch on small cards. Before Ampere (sm_80) the tensor
+cores have no bf16 support, so use `--precision fp16` on Volta and Turing: on a T4, bf16 matmul
+runs at 2.2 TFLOPS against 21.8 in fp16.
