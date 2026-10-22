@@ -19,14 +19,23 @@ def _fmt(v) -> str:
     return str(v)
 
 
+# Summary-table columns. Each group is one number under alternative names; the
+# first one a step reports is shown, so `tflops` and its `tflops_mean` alias
+# are not both printed.
+KEY_METRICS = [
+    ("tflops", "tflops_mean", "gflops"), ("gbs", "gbs_copy_kernel"), ("errors",), ("imgs_per_sec",),
+    ("steps_per_sec",), ("tested_gb",), ("write_gbs",), ("batch_size",), ("dataset_images",), ("speedup",),
+    ("pinned_h2d_gbs",), ("bodies",), ("momentum_rel",), ("side",), ("sum_drift_rel",), ("threads",),
+]
+
+
 def key_metrics(r: StepResult) -> str:
     """Pick the human-interesting numbers of a step for the summary table."""
     m = r.metrics
     picks = []
-    for k in ("tflops", "tflops_mean", "gbs", "gbs_copy_kernel", "errors", "imgs_per_sec", "steps_per_sec",
-              "tested_gb", "write_gbs", "batch_size", "dataset_images", "speedup", "gflops",
-              "pinned_h2d_gbs", "bodies", "momentum_rel", "side", "sum_drift_rel", "threads"):
-        if k in m and m[k] is not None:
+    for group in KEY_METRICS:
+        k = next((k for k in group if m.get(k) is not None), None)
+        if k:
             picks.append(f"{k}={_fmt(m[k])}")
     return ", ".join(picks)
 

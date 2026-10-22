@@ -4,6 +4,63 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-10-22
+
+Bug-fix and documentation release. Two changes can affect scripts that call the tool: a run that
+cannot start (no driver, no GPU, bad `--device`) now exits 2 instead of 1, and an unknown name in
+`--steps` or `--skip` is an error instead of being ignored.
+
+### Added
+
+* `--version` on both commands, to check which release a machine is running.
+
+### Fixed
+
+* **Exit codes when a run cannot start.** No driver, no visible GPU or a bad `--device` ended in
+  a Python traceback and exit code 1, which the CLI documents as a hardware FAIL. Both commands now
+  print one line and exit 2 (ERROR).
+* **Typos in `--steps` / `--skip`** matched nothing, so the run silently did no work and reported
+  SKIPPED. Unknown step names are now rejected with the list of valid ones.
+* **The verdict depended on step order** when one step failed and another errored. FAIL now always
+  outranks ERROR.
+* **`--burn 0` and `--physics 0`** crashed the sustained steps with `ZeroDivisionError`. Every
+  sustained step now runs at least one timed launch. `nbody` and `stencil` also computed their
+  per-second rates from the requested duration instead of the measured one.
+* **PCIe link judged at idle.** GPUs drop the link to gen1 while idle, but the `pcie` step scored
+  the startup reading. It now reads the link generation and width while transferring, and
+  `system_info` reports the idle reading as info instead of a warning.
+* **Telemetry could watch the wrong GPU on multi-GPU machines.** NVML numbers devices in PCI order
+  and ignores `CUDA_VISIBLE_DEVICES`, while CUDA defaults to fastest-first. Both pipelines now bind
+  NVML to the GPU under test by PCI bus id.
+* **`--nvrtc` on Pascal** was refused before NVRTC was even tried, although the docs offered it as
+  the way to run there. It now works with a CUDA 12.x toolkit. A PTX that NVRTC produces but the
+  driver cannot load (toolkit newer than the driver) falls back to the shipped PTX instead of
+  aborting, and a driver too old for the shipped PTX gets a message naming R545.
+* **FP16 and tensor-core efficiency on data-centre parts.** Both are scored against the GeForce
+  ratios, which produced figures like "800% of theoretical" on an A100. A measurement above the
+  assumed peak is now reported unscored, and `fp16_burn` uses the 1/64 FP16 rate of sm_61.
+* The summary table printed aliases of the same number (`tflops` and `tflops_mean`, `gbs` and
+  `gbs_copy_kernel`, `tflops` and `gflops`).
+* `gpu-stress` logged steps per epoch before applying `--max-steps`.
+* **Installer:** a failed `uv`, `pipx` or `pip` install printed `installed:` and exited 0, because
+  `set -e` ignores a failing command on the left of `&&`. The driver check warned on machines whose
+  `libcuda.so.1` was in one of its paths but not all of them. `pip --user` on an externally managed
+  Python (PEP 668, the default on current Debian, Ubuntu and Arch) is now followed by the
+  zipapp fallback, and the closing message no longer says the PyTorch pipeline was installed when
+  the lite-only zipapp was.
+* `gpu_bench.py` judged every GPU against fixed 200 TFLOPS / 800 GB/s bars, telling healthy cards
+  their driver might be broken; it now prints raw numbers only. The "TF32" row of
+  `gpu_bench_details.py` ran in FP32 because TF32 matmul is opt-in in PyTorch.
+
+### Documentation
+
+* README rewritten: shorter, with a real output sample, both step lists, the verdict rules and
+  exit codes, a reproducible protocol for benchmarking a new GPU, an options table and a
+  troubleshooting table. It also corrects claims the code did not back: verified hardware with no
+  run on file, a PCIe step in the PyTorch suite, and Pascal support through `--nvrtc`.
+* New `docs/STEPS.md`: every step and every threshold, taken from the evaluation code.
+* `docs/TESTED_GPUS.md` reorganised; the RTX 5090 is listed as reported until a run is on file.
+
 ## [0.3.2] - 2026-09-28
 
 Documentation and installer usability fix. The lite pipeline, the kernels and the
@@ -151,6 +208,7 @@ First tagged release.
 
 * Initial scripts: `gpu_bench.py`, `gpu_bench_details.py`, `gpu_stress_cli.py`.
 
+[0.4.0]: https://github.com/HamzaGbada/gpu-stress-test/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/HamzaGbada/gpu-stress-test/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/HamzaGbada/gpu-stress-test/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/HamzaGbada/gpu-stress-test/releases/tag/v0.3.0

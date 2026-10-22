@@ -9,4 +9,4 @@ Two front-ends share the same runner, monitor, evaluator and reporter:
   NVIDIA driver.
 """
 
-__version__ = "0.3.2"
+__version__ = "0.4.0"

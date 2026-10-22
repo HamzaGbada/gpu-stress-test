@@ -138,20 +138,11 @@ def main():
     print(f"Conv2D speed (1/sec)   : {results['conv_speed']:.3f}")
     print(f"Memory Bandwidth (GB/s): {results['bandwidth']:.1f}")
 
-    print("\nAnalysis:")
-
-    # --- Analysis Section ---
-    if results["tflops"] > 200:
-        print("• Matrix multiply speed is extremely high → GPU driver & CUDA working.")
-    else:
-        print("• MatMul below expected range → possible driver or power issue.")
-
-    if results["bandwidth"] > 800:
-        print("• Memory bandwidth is strong → confirms PCIe + VRAM configuration OK.")
-    else:
-        print("• Low bandwidth → PCIe speed or driver installation might be wrong.")
-
-    print("• Your GPU is benchmarking successfully using PyTorch.\n")
+    # Raw numbers only. Fixed thresholds cannot judge them: a healthy laptop GPU
+    # and a data-centre part differ by 50x. The pipelines score each GPU against
+    # its own theoretical peaks instead.
+    print("\nThese are raw numbers with no pass/fail judgement. For an evaluated run,")
+    print("scored against this GPU's own peaks, use `gpu-stress` or `gpu-stress-lite`.")
     print("====================================================")
 
 

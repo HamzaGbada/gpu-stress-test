@@ -214,7 +214,7 @@ def step_matmul_burn(ctx: Context) -> dict:
     t_end = time.time() + duration
     next_log = time.time() + 5
     nonfinite = 0
-    while time.time() < t_end:
+    while not samples or time.time() < t_end:      # at least one sample, even with --burn 0
         t = _timed(mm, per_launch)
         samples.append(2 * n ** 3 / t / 1e12)
         if len(samples) % 20 == 1 and not bool(torch.isfinite(c).all()):
@@ -320,10 +320,10 @@ def step_training(ctx: Context) -> dict:
         ctx.log(f"  dataset allocation OOMed, reduced to {dataset_size} images")
     y_data = torch.randint(0, 1000, (dataset_size,), device=dev)
     steps_per_epoch = dataset_size // batch
-    ctx.log(f"  dataset {dataset_size:,} images ({dataset_size * IMG_BYTES / GB:.2f} GiB), "
-            f"{steps_per_epoch} steps/epoch, {cfg.epochs} epochs")
     if cfg.max_steps:
         steps_per_epoch = min(steps_per_epoch, cfg.max_steps)
+    ctx.log(f"  dataset {dataset_size:,} images ({dataset_size * IMG_BYTES / GB:.2f} GiB), "
+            f"{steps_per_epoch} steps/epoch, {cfg.epochs} epochs")
 
     epoch_times, losses, oom_events = [], [], 0
     imgs_done = 0

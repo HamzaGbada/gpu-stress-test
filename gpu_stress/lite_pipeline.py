@@ -7,20 +7,23 @@ from __future__ import annotations
 import argparse
 import sys
 
+from . import __version__
 from .cuda import driver as cu
 from .lite_steps import build_steps, load_kernels
 from .monitor import Monitor
-from .pipeline import Context, Pipeline
+from .pipeline import Context, Pipeline, select_steps
 from .report import plot_telemetry, print_summary, write_reports
 
 
 def parse_args(argv=None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="GPU stress test & evaluation (no PyTorch, no toolkit needed)")
+    p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     p.add_argument("--device", type=int, default=0, help="CUDA device index")
     p.add_argument("--burn", type=float, default=30, help="seconds per sustained burn step (default 30)")
     p.add_argument("--physics", type=float, default=15, help="seconds per physics step (n-body, stencil; default 15)")
     p.add_argument("--vram", type=float, default=0.9, help="fraction of free VRAM to cover in memtest (default 0.9)")
-    p.add_argument("--mem-passes", type=int, default=6, help="memtest patterns (6 fixed + random)")
+    p.add_argument("--mem-passes", type=int, default=6,
+                   help="memtest patterns: the first 6 are fixed, any beyond that are random (default 6)")
     p.add_argument("--mem-max-gb", type=float, default=0,
                    help="cap the memtest buffer in GiB (0 = no cap; useful on 80-192 GB parts)")
     p.add_argument("--mem-budget", type=float, default=120,
@@ -30,7 +33,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--reps", type=int, default=20, help="repetitions for timing bandwidth/matmul")
     p.add_argument("--steps", default="", help="comma list of steps to run (default: all)")
     p.add_argument("--skip", default="", help="comma list of steps to skip")
-    p.add_argument("--nvrtc", action="store_true", help="compile kernels with NVRTC for this GPU if a toolkit is present")
+    p.add_argument("--nvrtc", action="store_true",
+                   help="compile the kernels for this exact GPU with a CUDA toolkit's NVRTC (required before Volta)")
     p.add_argument("--interval", type=float, default=0.25, help="telemetry sample interval in seconds")
     p.add_argument("--out", default="results", help="output directory")
     p.add_argument("--gui", action="store_true", help="show telemetry plot at the end (needs matplotlib)")
@@ -46,9 +50,16 @@ def main(argv=None) -> int:
             print(f"{s.name:14s} {s.description}")
         return 0
 
-    drv = cu.Driver()
-    cctx = cu.Context(drv, args.device)
-    mon = Monitor(args.device, args.interval).start()
+    try:
+        only, skip = select_steps(steps, args.steps, args.skip)
+        drv = cu.Driver()
+        cctx = cu.Context(drv, args.device)
+    # A typo in --steps, no driver, no GPU or a bad --device is an ERROR (exit 2).
+    # Left uncaught it would exit 1, which the CLI documents as a hardware FAIL.
+    except (ValueError, RuntimeError) as e:
+        print(f"gpu-stress-lite: {e}", file=sys.stderr)
+        return 2
+    mon = Monitor(args.device, args.interval, pci_bus_id=cctx.info.pci_bus_id).start()
     device = cctx.info.as_dict()
     device.update({"cc_major": cctx.info.cc_major, "cc_minor": cctx.info.cc_minor,
                    "cores_per_sm": cu.cores_per_sm(cctx.info.cc_major, cctx.info.cc_minor),
@@ -60,10 +71,14 @@ def main(argv=None) -> int:
     ctx = Context(config=args, monitor=mon, device=device, oom_types=(cu.CudaOutOfMemory,))
     ctx.extra["cuda"] = cctx
     ctx.log(f"GPU stress (lite) on {device['name']} - driver {device.get('driver_version')}")
-    ctx.extra["kernels"] = load_kernels(ctx, cctx, args.nvrtc)
+    try:
+        ctx.extra["kernels"] = load_kernels(ctx, cctx, args.nvrtc)
+    except RuntimeError as e:          # pre-Volta GPU without --nvrtc, or a driver too old for the PTX
+        print(f"gpu-stress-lite: {e}", file=sys.stderr)
+        mon.stop()
+        cctx.close()
+        return 2
 
-    only = {s for s in args.steps.split(",") if s}
-    skip = {s for s in args.skip.split(",") if s}
     status = "error"
     try:
         Pipeline(steps, ctx).run(only or None, skip or None)

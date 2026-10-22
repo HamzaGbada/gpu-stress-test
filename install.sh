@@ -63,7 +63,7 @@ while [ $# -gt 0 ]; do
         --extras)   EXTRAS="${2:?--extras needs a value, e.g. --extras torch,plot}"; shift 2 ;;
         --extras=*) EXTRAS="${1#*=}"; shift ;;
         --torch)    EXTRAS="torch,plot"; shift ;;
-        --version)   VERSION="${2:?--version needs a value, e.g. --version v0.3.2}"; shift 2 ;;
+        --version)   VERSION="${2:?--version needs a value, e.g. --version v0.4.0}"; shift 2 ;;
         --version=*) VERSION="${1#*=}"; shift ;;
         --method)   METHOD="${2:?--method needs a value}"; shift 2 ;;
         --method=*) METHOD="${1#*=}"; shift ;;
@@ -80,8 +80,15 @@ case "$(uname -s)" in
     *)      die "only Linux is supported (NVIDIA's CUDA driver library is Linux/Windows only)" ;;
 esac
 
-if ! have nvidia-smi && ! ls /usr/lib/libcuda.so.1 /usr/lib64/libcuda.so.1 \
-        /usr/lib/x86_64-linux-gnu/libcuda.so.1 >/dev/null 2>&1; then
+# Test each path on its own: `ls a b c` fails as soon as any one is missing.
+have_libcuda() {
+    for f in /usr/lib/libcuda.so.1 /usr/lib64/libcuda.so.1 /usr/lib/x86_64-linux-gnu/libcuda.so.1 \
+             /usr/lib/aarch64-linux-gnu/libcuda.so.1 /usr/lib/aarch64-linux-gnu/tegra/libcuda.so.1; do
+        if [ -e "$f" ]; then return 0; fi
+    done
+    return 1
+}
+if ! have nvidia-smi && ! have_libcuda; then
     warn "no NVIDIA driver found (no nvidia-smi, no libcuda.so.1) - installing anyway,"
     warn "but the tool needs a driver to run."
 fi
@@ -124,7 +131,7 @@ fetch() {  # fetch URL DEST
 
 install_zipapp() {
     if [ "${VERSION:-}" = "main" ]; then
-        die "the zipapp is published per release; use GPU_STRESS_VERSION=<tag> or another method"
+        die "the zipapp is published per release; use --version <tag> or another --method"
     fi
     if [ -n "$EXTRAS" ]; then
         warn "the zipapp cannot carry extras ($EXTRAS) - it is the lite pipeline only."
@@ -143,25 +150,59 @@ install_zipapp() {
     INSTALLED="$BIN_DIR/gpu-stress-lite"
 }
 
+# A package install always creates both commands, but `gpu-stress` only works
+# with the torch extra, so only then is it reported as installed.
+package_installed() {
+    INSTALLED="gpu-stress-lite"
+    case "$EXTRAS" in *torch*) TORCH_OK=yes; INSTALLED="gpu-stress-lite, gpu-stress" ;; esac
+}
+
+# Each installer either succeeds or stops the script. `cmd && ok` would not:
+# under `set -e` a failing left side of && is ignored, and the script would go
+# on to print a success message for an install that never happened.
+install_uv() {
+    say "installing with uv from $REF"
+    uv tool install --force "$SPEC" || die "uv tool install failed"
+    package_installed
+}
+
+install_pipx() {
+    say "installing with pipx from $REF"
+    pipx install --force "$SPEC" || die "pipx install failed"
+    package_installed
+}
+
+install_pip() {  # returns non-zero on failure so auto mode can fall back
+    say "installing with pip --user from $REF"
+    "$PY" -m pip install --user --upgrade "$SPEC" || return 1
+    package_installed
+}
+
 # -------------------------------------------------------------------- install
 INSTALLED=""
+TORCH_OK=no
 case "$METHOD" in
     auto)
-        if   have uv;   then say "installing with uv from $REF";   uv tool install --force "$SPEC" && INSTALLED="gpu-stress-lite"
-        elif have pipx; then say "installing with pipx from $REF"; pipx install --force "$SPEC" && INSTALLED="gpu-stress-lite"
+        if   have uv;   then install_uv
+        elif have pipx; then install_pipx
         elif "$PY" -m pip --version >/dev/null 2>&1; then
-            say "installing with pip --user from $REF"
-            "$PY" -m pip install --user --upgrade "$SPEC" && INSTALLED="gpu-stress-lite"
+            if ! install_pip; then
+                # Most distro Pythons are "externally managed" (PEP 668) and refuse --user installs.
+                [ -z "$EXTRAS" ] || die "pip install failed; install uv (https://docs.astral.sh/uv/) or pipx and re-run"
+                warn "pip install failed (an externally-managed Python refuses --user installs);"
+                warn "falling back to the standalone zipapp"
+                install_zipapp
+            fi
         else
             say "no uv/pipx/pip found - falling back to the standalone zipapp"
             install_zipapp
         fi
         ;;
-    uv)     have uv   || die "uv not found";   uv tool install --force "$SPEC"; INSTALLED="gpu-stress-lite" ;;
-    pipx)   have pipx || die "pipx not found"; pipx install --force "$SPEC";    INSTALLED="gpu-stress-lite" ;;
-    pip)    "$PY" -m pip install --user --upgrade "$SPEC"; INSTALLED="gpu-stress-lite" ;;
+    uv)     have uv   || die "uv not found";   install_uv ;;
+    pipx)   have pipx || die "pipx not found"; install_pipx ;;
+    pip)    install_pip || die "pip install failed" ;;
     zipapp) install_zipapp ;;
-    *)      die "unknown GPU_STRESS_METHOD: $METHOD" ;;
+    *)      die "unknown method: $METHOD (expected auto, uv, pipx, pip or zipapp)" ;;
 esac
 
 say ""
@@ -179,15 +220,13 @@ esac
 say ""
 say "  gpu-stress-lite --list          # show the steps"
 say "  gpu-stress-lite --burn 60       # full run, 60s per sustained load"
-case "$EXTRAS" in
-    *torch*)
-        say "  gpu-stress --epochs 3           # PyTorch pipeline (installed)"
-        ;;
-    *)
-        say ""
-        say "The PyTorch pipeline (gpu-stress) is not installed: it pulls several GB of"
-        say "wheels, so it is an opt-in extra. To add it, re-run with --torch:"
-        say ""
-        say "  curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | sh -s -- --torch"
-        ;;
-esac
+if [ "$TORCH_OK" = yes ]; then
+    say "  gpu-stress --epochs 3           # PyTorch pipeline"
+else
+    say ""
+    say "The PyTorch pipeline (gpu-stress) is not installed: it pulls several GB of"
+    say "wheels, so it is an opt-in extra. To add it, re-run with --torch"
+    say "(this needs uv, pipx or pip - the zipapp cannot carry it):"
+    say ""
+    say "  curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | sh -s -- --torch"
+fi

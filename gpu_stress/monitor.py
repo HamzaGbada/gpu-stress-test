@@ -87,8 +87,8 @@ def summarize(samples: list[Sample]) -> WindowSummary:
 
 
 class Monitor:
-    def __init__(self, device: int = 0, interval: float = 0.25) -> None:
-        self.nvml = Nvml(device)
+    def __init__(self, device: int = 0, interval: float = 0.25, pci_bus_id: str | None = None) -> None:
+        self.nvml = Nvml(device, pci_bus_id)
         self.interval = interval
         self.samples: list[Sample] = []
         self.marks: list[tuple[float, str]] = []      # (t, "step:start"/"step:end")

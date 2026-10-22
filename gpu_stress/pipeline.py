@@ -142,8 +142,23 @@ class Pipeline:
         ctx.log("")
 
 
+def select_steps(steps: list[Step], only: str, skip: str) -> tuple[set[str], set[str]]:
+    """Parse the --steps / --skip comma lists. Unknown names are an error rather
+    than silently matching nothing, so a typo cannot turn into an empty run."""
+    def names(csv: str) -> set[str]:
+        return {n.strip() for n in csv.split(",") if n.strip()}
+
+    only_set, skip_set = names(only), names(skip)
+    unknown = sorted((only_set | skip_set) - {s.name for s in steps})
+    if unknown:
+        raise ValueError(f"unknown step(s): {', '.join(unknown)} (valid: {', '.join(s.name for s in steps)})")
+    return only_set, skip_set
+
+
 def overall_status(results: list[StepResult]) -> str:
-    order = {"pass": 0, "skipped": 0, "warn": 1, "fail": 2, "error": 2}
+    # A detected wrong result outranks a step that could not run, so the
+    # verdict (and exit code) does not depend on which one came first.
+    order = {"pass": 0, "skipped": 0, "warn": 1, "error": 2, "fail": 3}
     if not results:
         return "skipped"
     return max(results, key=lambda r: order[r.status]).status if any(

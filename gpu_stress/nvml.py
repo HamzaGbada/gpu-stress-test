@@ -75,9 +75,15 @@ def _load() -> ctypes.CDLL | None:
 
 
 class Nvml:
-    """One NVML session bound to a device index."""
+    """One NVML session bound to a device.
 
-    def __init__(self, index: int = 0) -> None:
+    Pass the PCI bus id of the GPU under test whenever it is known. NVML
+    numbers devices in PCI order and ignores CUDA_VISIBLE_DEVICES, while CUDA
+    defaults to fastest-first, so on a multi-GPU machine the same index can
+    name two different cards. The index is only the fallback.
+    """
+
+    def __init__(self, index: int = 0, pci_bus_id: str | None = None) -> None:
         self.lib = _load()
         self.ok = self.lib is not None
         self.handle = ctypes.c_void_p()
@@ -85,6 +91,9 @@ class Nvml:
             return
         if self.lib.nvmlInit_v2() != 0:
             self.ok = False
+            return
+        if pci_bus_id and self.lib.nvmlDeviceGetHandleByPciBusId_v2(
+                pci_bus_id.encode(), ctypes.byref(self.handle)) == 0:
             return
         if self.lib.nvmlDeviceGetHandleByIndex_v2(index, ctypes.byref(self.handle)) != 0:
             self.ok = False

@@ -2,6 +2,8 @@
 import argparse
 import functools
 
+import pytest
+
 from gpu_stress.evaluate import (
     Finding,
     efficiency_finding,
@@ -11,9 +13,11 @@ from gpu_stress.evaluate import (
     theoretical_fp32_tflops,
     worst,
 )
+from gpu_stress.lite_pipeline import main as lite_main
 from gpu_stress.monitor import Monitor, summarize
 from gpu_stress.nvml import Sample
-from gpu_stress.pipeline import Context, Pipeline, Step, StepSkipped, overall_status
+from gpu_stress.pipeline import Context, Pipeline, Step, StepResult, StepSkipped, overall_status, select_steps
+from gpu_stress.report import key_metrics
 
 RTX4050 = {"sm_count": 20, "cores_per_sm": 128, "max_sm_clock_mhz": 3105, "mem_clock_mhz": 8001,
            "bus_width_bits": 96, "temp_slowdown_c": 92, "power_limit_w": 60}
@@ -114,3 +118,33 @@ def test_runner_step_selection():
     steps = [Step(n, functools.partial(lambda c, n: ran.append(n) or {}, n=n)) for n in ("a", "b", "c")]
     Pipeline(steps, _ctx()).run(only={"a", "c"}, skip={"c"})
     assert ran == ["a"]
+
+
+def test_step_lists_reject_unknown_names():
+    steps = [Step(n, lambda c: {}) for n in ("memtest", "matmul")]
+    assert select_steps(steps, "memtest, matmul", "") == ({"memtest", "matmul"}, set())
+    assert select_steps(steps, "", "") == (set(), set())
+    with pytest.raises(ValueError, match="memtst"):
+        select_steps(steps, "memtst", "")
+    with pytest.raises(ValueError, match="nope"):
+        select_steps(steps, "", "nope")
+
+
+def test_fail_outranks_error_regardless_of_order():
+    ctx = _ctx()
+    fail = Step("bad", lambda c: {}, evaluate=lambda m, t, c: [Finding("fail", "wrong result")])
+    crash = Step("crash", lambda c: 1 / 0)
+    assert overall_status(Pipeline([fail, crash], ctx).run()) == "fail"
+    assert overall_status(Pipeline([crash, fail], _ctx()).run()) == "fail"
+
+
+def test_cli_rejects_a_typo_in_steps_before_touching_the_gpu(capsys):
+    assert lite_main(["--steps", "memtst"]) == 2
+    assert "unknown step(s): memtst" in capsys.readouterr().err
+
+
+def test_summary_shows_each_number_once():
+    r = StepResult("fp32_burn", "pass", 1.0, {"tflops": 11.0, "tflops_mean": 11.0, "errors": 0})
+    assert key_metrics(r) == "tflops=11.000, errors=0"
+    r = StepResult("bandwidth", "pass", 1.0, {"gbs": 173.0, "gbs_copy_kernel": 173.0})
+    assert key_metrics(r) == "gbs=173.000"

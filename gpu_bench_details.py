@@ -130,11 +130,14 @@ def mixed_precision_benchmark():
         (torch.float32, "FP32"),
         (torch.bfloat16, "BF16"),
         (torch.float16, "FP16"),
-        (torch.float32, "TF32"),  # PyTorch uses TF32 on Ampere+ by default
+        (torch.float32, "TF32"),  # fp32 inputs on the TF32 tensor-core path (Ampere+)
     ]
 
     for dtype, label in tests:
+        # TF32 matmul is opt-in since PyTorch 1.12; without this the TF32 row is FP32 again.
+        torch.backends.cuda.matmul.allow_tf32 = label == "TF32"
         results[label] = bm_matmul(dtype, label)
+    torch.backends.cuda.matmul.allow_tf32 = False
 
     return results
 

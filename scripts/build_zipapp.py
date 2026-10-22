@@ -2,7 +2,7 @@
 """Build `gpu-stress.pyz`, a single-file executable of the lite pipeline.
 
 The lite pipeline has no third-party dependencies, so the whole tool fits in
-one ~90 KB zipapp that runs on any machine with CPython 3.10+ and an NVIDIA
+one ~180 KB zipapp that runs on any machine with CPython 3.10+ and an NVIDIA
 driver - no pip, no virtualenv, no network at run time:
 
     python3 scripts/build_zipapp.py

@@ -9,6 +9,8 @@ import os
 import sys
 import warnings
 
+from . import __version__  # gpu_stress/__init__.py does not import torch
+
 warnings.filterwarnings("ignore")
 
 
@@ -32,6 +34,7 @@ _configure_allocator()
 
 def parse_args(argv=None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="PyTorch GPU stress test & evaluation pipeline")
+    p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     p.add_argument("--device", type=int, default=0)
     p.add_argument("--epochs", type=int, default=3, help="ResNet50 training epochs (default 3)")
     p.add_argument("--batch", type=int, default=64, help="requested batch size (auto-halved until it fits)")
@@ -90,15 +93,26 @@ def main(argv=None) -> int:
 
     from .cuda.driver import cores_per_sm
     from .monitor import Monitor
-    from .pipeline import Context, Pipeline
+    from .pipeline import Context, Pipeline, select_steps
     from .report import plot_telemetry, print_summary, write_reports
 
+    try:
+        only, skip = select_steps(steps, args.steps, args.skip)
+    except ValueError as e:
+        print(f"gpu-stress: {e}", file=sys.stderr)
+        return 2
     if not torch.cuda.is_available():
-        print("CUDA is not available to PyTorch")
+        print("gpu-stress: CUDA is not available to PyTorch", file=sys.stderr)
+        return 2
+    if not 0 <= args.device < torch.cuda.device_count():
+        print(f"gpu-stress: no CUDA device {args.device} ({torch.cuda.device_count()} visible)", file=sys.stderr)
         return 2
     torch.cuda.set_device(args.device)
     props = torch.cuda.get_device_properties(args.device)
-    mon = Monitor(args.device, args.interval).start()
+    # Match NVML to this exact GPU by PCI address (older torch lacks the fields).
+    bus = (f"{props.pci_domain_id:04x}:{props.pci_bus_id:02x}:{props.pci_device_id:02x}.0"
+           if hasattr(props, "pci_bus_id") else None)
+    mon = Monitor(args.device, args.interval, pci_bus_id=bus).start()
     device = {"name": props.name, "total_mem_bytes": props.total_memory, "sm_count": props.multi_processor_count,
               "compute_capability": f"{props.major}.{props.minor}", "cc_major": props.major, "cc_minor": props.minor,
               "cores_per_sm": cores_per_sm(props.major, props.minor)}
@@ -106,8 +120,6 @@ def main(argv=None) -> int:
     ctx = Context(config=args, monitor=mon, device=device, oom_types=OOM)
     ctx.log(f"GPU stress (torch {torch.__version__}) on {props.name} - driver {device.get('driver_version')}")
 
-    only = {s for s in args.steps.split(",") if s}
-    skip = {s for s in args.skip.split(",") if s}
     status = "error"
     try:
         Pipeline(steps, ctx).run(only or None, skip or None)

@@ -120,9 +120,10 @@ def eval_system_info(m: dict, t, ctx: Context) -> list[Finding]:
     gen, width = d.get("pcie_gen"), d.get("pcie_width")
     max_gen, max_width = d.get("pcie_gen_max"), d.get("pcie_width_max")
     if gen and max_gen and (gen < max_gen or (width and max_width and width < max_width)):
-        out.append(Finding("warn", f"PCIe link is running at gen{gen} x{width}, below the card's "
-                                   f"gen{max_gen} x{max_width} (idle down-training is normal; "
-                                   f"check again in the pcie step)"))
+        # Informational only: GPUs drop the link to gen1 when idle and retrain
+        # under traffic. The pcie step judges the link while it is loaded.
+        out.append(Finding("info", f"PCIe link is at gen{gen} x{width} right now, the card supports "
+                                   f"gen{max_gen} x{max_width} - normal at idle, the pcie step re-checks it under load"))
     return out
 
 
@@ -257,6 +258,9 @@ def step_pcie(ctx: Context) -> dict:
         dev.from_host(host)                      # warm-up / first touch
         c.synchronize()
         h2d = _timed(ctx, lambda: [dev.from_host(host) for _ in range(reps)]) / reps
+        # Read the link while it is carrying traffic: the startup value in
+        # ctx.device is often the idle gen1 training, not what the card can do.
+        link = {k: v for k, v in ctx.monitor.nvml.pcie_link().items() if v}
         d2h = _timed(ctx, lambda: [dev.to_host(host) for _ in range(reps)]) / reps
         pinned_h2d = size / (h2d / 1000) / 1e9
         pinned_d2h = size / (d2h / 1000) / 1e9
@@ -270,20 +274,22 @@ def step_pcie(ctx: Context) -> dict:
     finally:
         host.free()
         dev.free()
-    ctx.log(f"  {size / MB:.0f} MiB pinned: H2D {pinned_h2d:.1f} GB/s, D2H {pinned_d2h:.1f} GB/s")
+    gen = link.get("pcie_gen", ctx.device.get("pcie_gen"))
+    width = link.get("pcie_width", ctx.device.get("pcie_width"))
+    ctx.log(f"  {size / MB:.0f} MiB pinned: H2D {pinned_h2d:.1f} GB/s, D2H {pinned_d2h:.1f} GB/s "
+            f"(link under load: gen{gen or '?'} x{width or '?'})")
     ctx.log(f"  {size / MB:.0f} MiB pageable: H2D {page_h2d:.1f} GB/s")
     return {"size_mb": round(size / MB, 1), "pinned_h2d_gbs": round(pinned_h2d, 2),
             "pinned_d2h_gbs": round(pinned_d2h, 2), "pageable_h2d_gbs": round(page_h2d, 2),
-            "gbs": round(max(pinned_h2d, pinned_d2h), 2),
-            "pcie_gen": ctx.device.get("pcie_gen"), "pcie_width": ctx.device.get("pcie_width")}
+            "gbs": round(max(pinned_h2d, pinned_d2h), 2), "pcie_gen": gen, "pcie_width": width}
 
 
 def eval_pcie(m: dict, t, ctx: Context) -> list[Finding]:
     d = ctx.device
-    out = efficiency_finding(m["gbs"], theoretical_pcie_gbs(d), "GB/s",
-                             f"host<->device link (gen{d.get('pcie_gen', '?')} x{d.get('pcie_width', '?')})",
+    gen, width = m.get("pcie_gen"), m.get("pcie_width")      # measured under load by step_pcie
+    out = efficiency_finding(m["gbs"], theoretical_pcie_gbs({**d, "pcie_gen": gen, "pcie_width": width}), "GB/s",
+                             f"host<->device link (gen{gen or '?'} x{width or '?'})",
                              warn_below=0.55, fail_below=0.3)
-    gen, width = d.get("pcie_gen"), d.get("pcie_width")
     max_gen, max_width = d.get("pcie_gen_max"), d.get("pcie_width_max")
     if gen and max_gen and gen < max_gen:
         out.append(Finding("warn", f"PCIe link trained to gen{gen} instead of gen{max_gen} under load - "
@@ -292,7 +298,8 @@ def eval_pcie(m: dict, t, ctx: Context) -> list[Finding]:
         out.append(Finding("warn", f"PCIe link is x{width} instead of x{max_width} - the card is in a "
                                    f"narrower slot or sharing lanes"))
     if m["pinned_h2d_gbs"] and m["pageable_h2d_gbs"] > m["pinned_h2d_gbs"] * 1.1:
-        out.append(Finding("info", "pageable transfers matched pinned ones - unusual, but harmless"))
+        out.append(Finding("info", f"pageable H2D ({m['pageable_h2d_gbs']} GB/s) beat pinned "
+                                   f"({m['pinned_h2d_gbs']} GB/s) - unusual, pinned is normally the faster path"))
     return out
 
 
@@ -379,7 +386,8 @@ def _burn(ctx: Context, kernel_name: str, flops_per_thread_iter: float, verify, 
         launches = 0
         t_end = time.time() + duration
         next_log = time.time() + 5
-        while time.time() < t_end:
+        # At least one timed launch, so --burn 0 still verifies the kernel once.
+        while not samples or time.time() < t_end:
             ms = _timed(ctx, lambda: k.launch(grid, BLOCK, out, iters, *extra_args))
             samples.append(flops_per_thread_iter * iters * n_threads / (ms / 1000) / 1e12)
             launches += 1
@@ -406,7 +414,14 @@ def _peak_findings(measured: float, ratio_to_fp32: float, t, ctx: Context, what:
     power capping) plus an informational line against the rated boost clock."""
     rated = theoretical_fp32_tflops(ctx.device)
     observed = theoretical_fp32_tflops(ctx.device, t.sm_clock_mean)
-    out = efficiency_finding(measured, observed * ratio_to_fp32 if observed else None, "TFLOPS",
+    peak = observed * ratio_to_fp32 if observed else None
+    # Beating the assumed peak means this part has faster units than the ratio
+    # assumes (data-centre FP16 and tensor cores run 2-16x FP32, GeForce 1-2x),
+    # so a percentage would be meaningless: report the number, do not score it.
+    if peak and measured > 1.15 * peak:
+        return [Finding("info", f"{what}: {measured:.1f} TFLOPS, above the {peak:.1f} TFLOPS the evaluator "
+                                f"assumes for this part (GeForce ratios) - reported, not scored")]
+    out = efficiency_finding(measured, peak, "TFLOPS",
                              f"{what} at observed {t.sm_clock_mean or 0:.0f} MHz", warn_below=0.55, fail_below=0.3)
     if rated and observed and abs(rated - observed) / rated > 0.05:
         out.append(Finding("info", f"{what}: {100 * measured / (rated * ratio_to_fp32):.0f}% of rated boost-clock peak "
@@ -437,8 +452,10 @@ def step_fp16_burn(ctx: Context) -> dict:
 
 def eval_fp16_burn(m: dict, t, ctx: Context) -> list[Finding]:
     out = compute_error_finding(m["errors"], "FP16 FMA chains")
-    # packed fp16 (non tensor-core) runs at the FP32 rate on Ampere/Ada/Blackwell consumer parts
-    out += _peak_findings(m["tflops_mean"], 1.0, t, ctx, "sustained FP16x2")
+    # Packed fp16 (non tensor-core) runs at the FP32 rate on Ampere/Ada/Blackwell
+    # consumer parts, but at 1/64 of it on GP10x Pascal (sm_61).
+    cc = (ctx.device.get("cc_major"), ctx.device.get("cc_minor"))
+    out += _peak_findings(m["tflops_mean"], 1 / 64 if cc == (6, 1) else 1.0, t, ctx, "sustained FP16x2")
     out += stability_finding(m["tflops_first"], m["tflops_last"], "TFLOPS", "FP16 throughput")
     return out
 
@@ -496,9 +513,9 @@ def _nbody_momentum(ctx: Context, vel: cu.DeviceBuffer, n: int) -> tuple[float, 
 def step_nbody(ctx: Context) -> dict:
     c = _ctx(ctx)
     n = min(131072, max(8192, c.info.sm_count * 1024))
-    n -= n % NB_TILE
     while 4 * n * 16 > _budget(ctx, 0.5) and n > NB_TILE * 8:
         n //= 2
+    n -= n % NB_TILE                         # nbody_step has no bounds checks
     pos_h, vel_h = _nbody_init(n)
     pos, vel = c.alloc(n * 16), c.alloc(n * 16)
     pos2, vel2 = c.alloc(n * 16), c.alloc(n * 16)
@@ -520,9 +537,10 @@ def step_nbody(ctx: Context) -> dict:
 
         samples: list[float] = []
         steps_done = 0
-        t_end = time.time() + duration
-        next_log = time.time() + 5
-        while time.time() < t_end:
+        started = time.time()
+        t_end = started + duration
+        next_log = started + 5
+        while not samples or time.time() < t_end:
             ms = _timed(ctx, batch)
             steps_done += 2 * per_batch
             samples.append(2 * per_batch * n * n * NBODY_FLOPS_PER_PAIR / (ms / 1000) / 1e12)
@@ -531,6 +549,7 @@ def step_nbody(ctx: Context) -> dict:
                 tele = f" | {s.temp}°C {s.power_w:.0f}W {s.sm_clock}MHz" if s and s.temp is not None else ""
                 ctx.log(f"    {t_end - time.time():5.0f}s left  {samples[-1]:6.2f} TFLOPS{tele}")
                 next_log += 5
+        elapsed = time.time() - started          # measured, not --physics: the last batch overruns it
         px, py, pz, scale = _nbody_momentum(ctx, vel, n)
         sample_pos = pos.download_f32(4096)
     finally:
@@ -542,11 +561,11 @@ def step_nbody(ctx: Context) -> dict:
     k5 = max(1, len(samples) // 5)
     ctx.log(f"  {steps_done} steps, momentum |P| = {drift:.3e} vs scale {scale:.3e} "
             f"(relative {rel:.2e}), positions finite: {finite}")
-    return {"bodies": n, "steps": steps_done, "seconds": duration,
+    return {"bodies": n, "steps": steps_done, "seconds": round(elapsed, 2),
             "tflops_mean": round(sum(samples) / len(samples), 3),
             "tflops_first": round(sum(samples[:k5]) / k5, 3), "tflops_last": round(sum(samples[-k5:]) / k5, 3),
             "tflops": round(sum(samples) / len(samples), 3),
-            "interactions_per_s": round(steps_done * n * n / duration, 0),
+            "interactions_per_s": round(steps_done * n * n / elapsed, 0),
             "momentum_drift": drift, "momentum_scale": scale, "momentum_rel": rel, "finite": finite}
 
 
@@ -611,9 +630,10 @@ def step_stencil(ctx: Context) -> dict:
 
         samples: list[float] = []
         steps = 0
-        t_end = time.time() + duration
-        next_log = time.time() + 5
-        while time.time() < t_end:
+        started = time.time()
+        t_end = started + duration
+        next_log = started + 5
+        while not samples or time.time() < t_end:
             ms = _timed(ctx, batch)
             steps += per_batch
             # each step reads the field once and writes it once (neighbours come from cache)
@@ -623,6 +643,7 @@ def step_stencil(ctx: Context) -> dict:
                 tele = f" | {s.temp}°C {s.power_w:.0f}W {s.sm_clock}MHz" if s and s.temp is not None else ""
                 ctx.log(f"    {t_end - time.time():5.0f}s left  {samples[-1]:6.0f} GB/s{tele}")
                 next_log += 5
+        elapsed = time.time() - started
         sum1, min1, max1 = _reduce_stats(ctx, u, n)
     finally:
         u.free()
@@ -637,10 +658,10 @@ def step_stencil(ctx: Context) -> dict:
     k5 = max(1, len(samples) // 5)
     ctx.log(f"  {steps} steps: sum {sum0:.6e} -> {sum1:.6e} (relative drift {drift:.2e}), "
             f"range [{min1:.4f}, {max1:.4f}] within initial [{min0:.4f}, {max0:.4f}]")
-    return {"side": side, "cells": n, "steps": steps, "seconds": duration, "alpha": alpha,
+    return {"side": side, "cells": n, "steps": steps, "seconds": round(elapsed, 2), "alpha": alpha,
             "gbs_mean": round(sum(samples) / len(samples), 1), "gbs": round(sum(samples) / len(samples), 1),
             "gbs_first": round(sum(samples[:k5]) / k5, 1), "gbs_last": round(sum(samples[-k5:]) / k5, 1),
-            "cells_per_s": round(steps * n / duration, 0),
+            "cells_per_s": round(steps * n / elapsed, 0),
             "sum_before": sum0, "sum_after": sum1, "sum_drift_rel": drift,
             "min_before": min0, "max_before": max0, "min_after": min1, "max_after": max1,
             "bounds_violated": bool(min1 < min0 - slack or max1 > max0 + slack),
@@ -835,29 +856,36 @@ KERNEL_NAMES = [
 
 def load_kernels(ctx: Context, cctx: cu.Context, prefer_nvrtc: bool) -> dict[str, cu.Kernel]:
     """Load the kernels: NVRTC for the exact arch if asked & available, else shipped PTX."""
+    from .cuda import read_kernel_file
+
     info = cctx.info
-    if info.cc_major < 7:
-        raise RuntimeError(f"the shipped PTX targets sm_70+ (Volta and newer); this GPU is sm_{info.cc_major}{info.cc_minor}. "
-                           "Rebuild gpu_stress/cuda/kernels.cu for an older arch with --nvrtc / nvrtc.py")
-    ptx = None
+    arch = f"compute_{info.cc_major}{info.cc_minor}"
+    mod = None
     if prefer_nvrtc:
         try:
-            from .cuda import read_kernel_file
-            from .cuda.nvrtc import compile_to_ptx, find_nvrtc
+            from .cuda.nvrtc import NvrtcError, compile_to_ptx, find_nvrtc
             lib = find_nvrtc()
-            if lib is not None:
-                ptx = compile_to_ptx(read_kernel_file("kernels.cu"),
-                                     f"compute_{info.cc_major}{info.cc_minor}", lib=lib)
-                ctx.log(f"  kernels: compiled with NVRTC for compute_{info.cc_major}{info.cc_minor}")
-        # Any NVRTC problem is recoverable: the shipped PTX always works.
+            if lib is None:
+                raise NvrtcError("libnvrtc not found")
+            mod = cctx.load_ptx(compile_to_ptx(read_kernel_file("kernels.cu"), arch, lib=lib))
+            ctx.log(f"  kernels: compiled with NVRTC for {arch}")
+        # Any NVRTC problem is recoverable: a toolkit too old to know this GPU, or
+        # newer than the driver (its PTX will not load), falls back to the shipped PTX.
         except Exception as e:
             ctx.log(f"  NVRTC unavailable ({e}); using shipped PTX")
-    if ptx is None:
-        from .cuda import read_kernel_file
+    if mod is None:
+        if info.cc_major < 7:
+            raise RuntimeError(f"the shipped PTX needs sm_70+ (Volta or newer) and this GPU is "
+                               f"sm_{info.cc_major}{info.cc_minor}; run with --nvrtc and a CUDA 12.x toolkit "
+                               f"installed to compile the kernels for it")
         fname = "kernels_sm80.ptx" if info.cc_major >= 8 else "kernels_sm70.ptx"
-        ptx = read_kernel_file(fname)
+        try:
+            mod = cctx.load_ptx(read_kernel_file(fname))
+        except cu.CudaError as e:
+            if e.code == cu.CUDA_ERROR_UNSUPPORTED_PTX_VERSION:
+                raise RuntimeError(f"{e}; the shipped PTX needs NVIDIA driver R545 or newer") from e
+            raise
         ctx.log(f"  kernels: {fname} (driver JIT for sm_{info.cc_major}{info.cc_minor})")
-    mod = cctx.load_ptx(ptx)
     names = list(KERNEL_NAMES)
     if info.cc_major >= 8:
         names.append("mma_burn")

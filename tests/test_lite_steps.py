@@ -16,10 +16,13 @@ from gpu_stress.lite_steps import (
     EDGE_INPUTS,
     KERNEL_NAMES,
     eval_edge_cases,
+    eval_fp16_burn,
     eval_memtest,
     eval_nbody,
+    eval_pcie,
     eval_stencil,
     eval_system_info,
+    eval_tensor_burn,
 )
 from gpu_stress.monitor import Monitor, summarize
 from gpu_stress.nvml import Sample
@@ -67,11 +70,32 @@ def test_system_info_explains_unified_memory():
     assert any("without an efficiency score" in s for s in msgs)
 
 
-def test_system_info_flags_downtrained_pcie_link():
+def test_system_info_reports_an_idle_downtrained_link_without_warning():
+    # GPUs drop to gen1 when idle, so the startup reading alone is not a fault.
     dev = dict(RTX4050, pcie_gen=1, pcie_width=4)
     m = {"theoretical_bandwidth_gbs": 192.0, "theoretical_fp32_tflops": 15.9, "theoretical_pcie_gbs": 1.0}
     findings = eval_system_info(m, _window(), _ctx(dev))
-    assert any(f.level == "warn" and "gen1 x4" in f.message for f in findings)
+    assert any(f.level == "info" and "gen1 x4" in f.message for f in findings)
+    assert not any(f.level in ("warn", "fail") for f in findings)
+
+
+def _pcie_metrics(**over):
+    m = {"gbs": 13.4, "pinned_h2d_gbs": 13.4, "pinned_d2h_gbs": 13.0, "pageable_h2d_gbs": 12.2,
+         "pcie_gen": 4, "pcie_width": 8}
+    m.update(over)
+    return m
+
+
+def test_pcie_is_judged_on_the_link_measured_under_load():
+    idle_at_startup = _ctx(dict(RTX4050, pcie_gen=1))
+    findings = eval_pcie(_pcie_metrics(), _window(), idle_at_startup)
+    assert not any(f.level in ("warn", "fail") for f in findings)
+    assert any("gen4 x8" in f.message and "85%" in f.message for f in findings)
+
+    findings = eval_pcie(_pcie_metrics(pcie_gen=3, gbs=7.0), _window(), idle_at_startup)
+    assert any(f.level == "warn" and "gen3 instead of gen4" in f.message for f in findings)
+    findings = eval_pcie(_pcie_metrics(pcie_width=4, gbs=7.0), _window(), idle_at_startup)
+    assert any(f.level == "warn" and "x4 instead of x8" in f.message for f in findings)
 
 
 # ---------------------------------------------------------------------------
@@ -154,6 +178,43 @@ def test_stencil_heat_conservation_levels():
     assert level(1e-8) == "info"
     assert level(1e-4) == "warn"
     assert level(0.2) == "fail"
+
+
+# ---------------------------------------------------------------------------
+# sustained burns
+# ---------------------------------------------------------------------------
+A100 = {"sm_count": 108, "cores_per_sm": 64, "max_sm_clock_mhz": 1410, "cc_major": 8, "cc_minor": 0}
+GTX1080 = {"sm_count": 20, "cores_per_sm": 128, "max_sm_clock_mhz": 1733, "cc_major": 6, "cc_minor": 1}
+
+
+def _burn_metrics(tflops):
+    return {"errors": 0, "launches": 100, "threads": 40960,
+            "tflops_mean": tflops, "tflops_first": tflops, "tflops_last": tflops}
+
+
+def _efficiency_levels(findings):
+    return [f.level for f in findings if "observed" in f.message or "not scored" in f.message]
+
+
+def test_tensor_burn_is_scored_against_the_geforce_rate():
+    ctx = _ctx(RTX4050)                              # 2x FP32 at 2565 MHz = 26.3 TFLOPS
+    assert _efficiency_levels(eval_tensor_burn(_burn_metrics(26.2), _window(2565), ctx)) == ["info"]
+    assert _efficiency_levels(eval_tensor_burn(_burn_metrics(10.0), _window(2565), ctx)) == ["warn"]
+    assert _efficiency_levels(eval_tensor_burn(_burn_metrics(5.0), _window(2565), ctx)) == ["fail"]
+
+
+def test_faster_units_than_assumed_are_reported_not_scored():
+    # An A100's tensor cores run at 16x FP32: 200 TFLOPS is healthy, not "513% of peak".
+    findings = eval_tensor_burn(_burn_metrics(200.0), _window(1410), _ctx(A100))
+    msgs = [f.message for f in findings if "not scored" in f.message]
+    assert len(msgs) == 1 and "%" not in msgs[0]
+    assert all(f.level == "info" for f in findings)
+
+
+def test_fp16_burn_expects_the_1_64_rate_on_gp10x_pascal():
+    # FP32 peak 8.9 TFLOPS at 1733 MHz; packed FP16 runs at 1/64 of that.
+    findings = eval_fp16_burn(_burn_metrics(0.13), _window(1733), _ctx(GTX1080))
+    assert not any(f.level in ("warn", "fail") for f in findings)
 
 
 # ---------------------------------------------------------------------------
